@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: MPL-2.0
+.{
+    .name = .smtp_notify_action,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x2b15c584ec1e2def,
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+    },
+}

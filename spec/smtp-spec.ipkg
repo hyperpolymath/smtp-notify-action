@@ -1,0 +1,15 @@
+package smtp-spec
+version = 0.1.0
+authors = "Jonathan D.A. Jewell"
+license = "MPL-2.0"
+brief = "Proven SMTP client-session contract + Zig FSM emitter"
+
+sourcedir = "."
+depends = base
+
+modules = Smtp.StateMachine
+        , Smtp.Serialize
+        , Smtp.EmitZig
+
+main = Smtp.EmitZig
+executable = "emit-zig"

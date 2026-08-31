@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: MPL-2.0
+= smtp-notify-action
+:toc: macro
+:source-highlighter: rouge
+
+Send a plain-text notification email from a GitHub workflow over implicit TLS
+(SMTPS, port 465). **Node-free**: the action is a composite step that runs one
+static binary — no `node_modules`, no container, no runtime dependency graph.
+
+The SMTP client session is **formally specified in Idris2** (state machine,
+reply-code classes, dot-stuffing, header-injection rejection — with
+machine-checked proofs) and **built in Zig** (0.16.0, static musl,
+byte-reproducible). The generated state table in the binary is diffed against
+the proven specification by CI on every push.
+
+toc::[]
+
+== Usage
+
+[source,yaml]
+----
+- name: Notify by mail
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.1.0
+  with:
+    server_address: ${{ secrets.SMTP_HOST }}
+    server_port: 465
+    secure: true
+    username: ${{ secrets.SMTP_USERNAME }}
+    password: ${{ secrets.SMTP_PASSWORD }}
+    from: 'GitHub Push <${{ secrets.SMTP_USERNAME }}>'
+    to: 'you@example.org teammate@example.org'
+    subject: 'Push to ${{ github.repository }}'
+    body: '${{ github.actor }} pushed ${{ github.sha }}'
+----
+
+The input surface is drop-in for the subset of `dawidd6/action-send-mail`
+this estate uses: `server_address`, `server_port`, `secure`, `username`,
+`password`, `from`, `to`, `subject`, `body`.
+
+== Inputs
+
+[cols="1,1,3"]
+|===
+|Input |Default |Meaning
+
+|`server_address` |_required_ |SMTP server host name.
+|`server_port` |`465` |SMTP server port.
+|`secure` |`true` |`true` = implicit TLS from the first byte (SMTPS).
+Anything else = plaintext, intended only for containerized test sinks.
+STARTTLS is not yet supported (planned for v1.1).
+|`username` |— |AUTH PLAIN username.
+|`password` |— |AUTH PLAIN password. Passed to the binary via the
+environment, never argv, so it cannot leak into process listings.
+|`from` |— |`From:` header value.
+|`to` |— |Recipients, separated by commas and/or whitespace.
+|`subject` |— |`Subject:` header value.
+|`body` |— |Plain-text body; dot-stuffed on the wire per RFC 5321 §4.5.2.
+|`handshake_only` |`false` |`true` = connect, TLS handshake, `EHLO`, `QUIT` —
+no auth, nothing sent. For canary/CI verification against a real server.
+|===
+
+== Security properties
+
+* **The pinned action ref fully determines the binary.** `action.yml` carries
+  the SHA-256 of each release asset; the composite step downloads, verifies,
+  then executes. A tampered asset fails the checksum, not the mail.
+* **Byte-reproducible binaries.** Stripped static musl builds with Zig 0.16.0
+  reproduce bit-identically from source regardless of build path. The release
+  workflow rebuilds from the tagged source and refuses to publish unless its
+  hashes equal the pins in `action.yml`.
+* **The credential never touches argv.** All configuration reaches the binary
+  as environment variables.
+* **Header injection is rejected, never sanitized.** CR or LF anywhere in
+  `from`, `to`, or `subject` aborts the run before any byte reaches the wire.
+  The rejection predicate is part of the Idris2 specification.
+* **Proven protocol core.** The RFC 5321 client session — which commands may
+  follow which replies, how reply codes classify, when `DATA` content must be
+  dot-stuffed — is an Idris2 specification with machine-checked proofs.
+  A generator emits the Zig state table *and* spec-evaluated golden test
+  vectors; a CI gate regenerates both and fails on any drift. The gate carries
+  a self-test proving it can fail.
+
+== TLS implementation note (read this)
+
+The binary uses Zig 0.16.0's standard-library TLS client — **vendored at
+`src/tls/Client.zig` with one disclosed patch**. Upstream Zig cannot yet
+answer a TLS 1.3 `CertificateRequest`
+(https://github.com/ziglang/zig/issues/19521[ziglang/zig#19521]), and
+Google-hosted SMTP endpoints such as `smtp.gmail.com:465` send one. The patch
+accepts the request and declines it with an empty `Certificate` message per
+RFC 8446 §4.4.2 — the correct behavior for a client with no certificate. It
+is ~60 lines on an otherwise verbatim copy of the std file, every changed
+region is marked `PATCH(#19521)`, and the file will be deleted in favor of
+`std.crypto.tls.Client` once upstream handles the message. Certificate
+verification against the system CA bundle is on and cannot be disabled.
+
+== How it is built
+
+[source]
+----
+spec/                Idris2: proven protocol specification (source of truth)
+  Smtp/StateMachine.idr    session FSM + 5 protocol proofs
+  Smtp/Serialize.idr       dot-stuffing + header rejection + stuffing theorem
+  Smtp/EmitZig.idr         emits the Zig table + golden vectors
+src/
+  generated/smtp_fsm.zig   GENERATED — never edit; CI diffs it against spec
+  smtp.zig                 session driver walking the generated table
+  message.zig              RFC 5322 date, stuffing, injection predicate
+  tls/Client.zig           vendored std TLS client + #19521 patch (see above)
+  main.zig                 env → config → connect → TLS → session
+----
+
+Build and test locally (Zig 0.16.0, Idris2 0.7.0):
+
+[source,sh]
+----
+zig build test                                        # unit + golden vectors
+zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+scripts/check-fsm-drift.sh --selftest                 # spec ↔ generated diff
+SMTP_HANDSHAKE_ONLY=true SMTP_SECURE=true \
+SMTP_ADDR=smtp.gmail.com SMTP_PORT=465 ./zig-out/bin/smtp-notify
+----
+
+== Versioning
+
+Pin by commit SHA (the estate's actions allowlist requires it). Tags `vX.Y.Z`
+mark the commits whose `action.yml` pins match the release assets of the same
+version. The asset URL inside `action.yml` names its own tag, so an action ref
+always downloads the binary generation it was reviewed with.
+
+== License
+
+MPL-2.0 (`LICENSE`). The vendored `src/tls/Client.zig` derives from the Zig
+standard library and remains MIT © the Zig contributors, as marked in its
+header.

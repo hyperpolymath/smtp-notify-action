@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: MPL-2.0
+# This workflow is managed by gh actions-lock.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  ZIG_TARBALL: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+
+jobs:
+  release:
+    name: Rebuild, verify against action.yml pins, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Zig 0.16.0 (sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zig.tar.xz "$ZIG_TARBALL"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig-toolchain"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-toolchain" --strip-components=1
+          echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
+
+      - name: 'Build both release binaries (reproducible: stripped static musl)'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+          cp zig-out/bin/smtp-notify dist/smtp-notify-x86_64-linux-musl
+          zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-musl
+          cp zig-out/bin/smtp-notify dist/smtp-notify-aarch64-linux-musl
+
+      - name: Verify rebuilt hashes equal the pins in action.yml
+        # THE release gate. The binaries are byte-reproducible from source, so
+        # a fresh CI rebuild must hash to exactly what action.yml pins. Any
+        # mismatch (source changed after pinning, toolchain drift, tampering)
+        # refuses the release instead of publishing assets the action would
+        # then reject at every run.
+        run: |
+          set -euo pipefail
+          mapfile -t pins < <(grep -oP 'sha256="\K[0-9a-f]{64}' action.yml)
+          [ "${#pins[@]}" = "2" ] || { echo "expected exactly 2 sha256 pins in action.yml, found ${#pins[@]}" >&2; exit 1; }
+          # pin order follows the case-arm order in action.yml: x86_64 first.
+          built_x86="$(sha256sum dist/smtp-notify-x86_64-linux-musl | cut -d' ' -f1)"
+          built_arm="$(sha256sum dist/smtp-notify-aarch64-linux-musl | cut -d' ' -f1)"
+          fail=0
+          [ "$built_x86" = "${pins[0]}" ] || { echo "x86_64 MISMATCH: built $built_x86, action.yml pins ${pins[0]}" >&2; fail=1; }
+          [ "$built_arm" = "${pins[1]}" ] || { echo "aarch64 MISMATCH: built $built_arm, action.yml pins ${pins[1]}" >&2; fail=1; }
+          [ "$fail" = "0" ] || exit 1
+          echo "pins verified: rebuilt binaries are byte-identical to action.yml's pins"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum smtp-notify-*-linux-musl > SHA256SUMS)
+          tag="${GITHUB_REF_NAME}"
+          gh release create "$tag" \
+            --title "$tag" \
+            --notes "Static, byte-reproducible smtp-notify binaries. CI rebuilt them from this tag and verified they hash to exactly the SHA-256 pins inside this tag's action.yml before publishing." \
+            dist/smtp-notify-x86_64-linux-musl \
+            dist/smtp-notify-aarch64-linux-musl \
+            dist/SHA256SUMS

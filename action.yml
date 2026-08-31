@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: MPL-2.0
+name: 'SMTP Notify'
+description: >-
+  Send a plain-text notification email over implicit TLS (SMTPS).
+  Node-free: one static binary whose SMTP session is formally specified in
+  Idris2 and machine-checked, built in Zig. Drop-in for the
+  dawidd6/action-send-mail input surface the estate uses.
+author: 'hyperpolymath'
+branding:
+  icon: 'mail'
+  color: 'purple'
+
+inputs:
+  server_address:
+    description: 'SMTP server host name'
+    required: true
+  server_port:
+    description: 'SMTP server port'
+    required: false
+    default: '465'
+  secure:
+    description: >-
+      "true" (default) = implicit TLS from the first byte (SMTPS, port 465).
+      Anything else = plaintext, intended only for containerized test sinks.
+      STARTTLS is not yet supported.
+    required: false
+    default: 'true'
+  username:
+    description: 'AUTH PLAIN username'
+    required: false
+    default: ''
+  password:
+    description: >-
+      AUTH PLAIN password. Reaches the binary via the environment, never argv,
+      so it cannot leak into process listings.
+    required: false
+    default: ''
+  from:
+    description: 'From: header value, e.g. "GitHub Push <bot@example.org>"'
+    required: false
+    default: ''
+  to:
+    description: 'Recipients, separated by commas and/or whitespace'
+    required: false
+    default: ''
+  subject:
+    description: 'Subject: header value. CR/LF is rejected, never sanitized.'
+    required: false
+    default: ''
+  body:
+    description: 'Plain-text body (dot-stuffed on the wire per RFC 5321)'
+    required: false
+    default: ''
+  handshake_only:
+    description: >-
+      "true" = connect, TLS handshake, EHLO, QUIT. No auth, nothing sent.
+      For canary/CI verification against a real server without delivering mail.
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Fetch and verify the smtp-notify binary
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The SHA-256 pins below are part of this commit: the action ref that
+        # consumers pin fully determines the binary that runs. The binaries
+        # are byte-reproducible from source (stripped static musl builds,
+        # zig 0.16.0); the release workflow rebuilds them and refuses to
+        # publish unless the hashes match these pins.
+        case "$(uname -m)" in
+          x86_64)
+            asset="smtp-notify-x86_64-linux-musl"
+            sha256="f8a849f4f91574e9a459f1cf003873032e88ce60b22a57ea11fb7ddd69bb0d82"
+            ;;
+          aarch64)
+            asset="smtp-notify-aarch64-linux-musl"
+            sha256="d527b4fd8ab84e5e722aacf27911cb824642e56308139df92e3972a5f989766a"
+            ;;
+          *)
+            echo "smtp-notify: unsupported runner architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.1.0/${asset}"
+        curl -fsSL --retry 3 --retry-delay 2 -o "${RUNNER_TEMP}/smtp-notify" "$url"
+        echo "${sha256}  ${RUNNER_TEMP}/smtp-notify" | sha256sum -c -
+        chmod +x "${RUNNER_TEMP}/smtp-notify"
+
+    - name: Send the notification
+      shell: bash
+      env:
+        SMTP_ADDR: ${{ inputs.server_address }}
+        SMTP_PORT: ${{ inputs.server_port }}
+        SMTP_SECURE: ${{ inputs.secure }}
+        SMTP_HANDSHAKE_ONLY: ${{ inputs.handshake_only }}
+        SMTP_USER: ${{ inputs.username }}
+        SMTP_PASS: ${{ inputs.password }}
+        MAIL_FROM: ${{ inputs.from }}
+        MAIL_TO: ${{ inputs.to }}
+        MAIL_SUBJECT: ${{ inputs.subject }}
+        MAIL_BODY: ${{ inputs.body }}
+      run: exec "${RUNNER_TEMP}/smtp-notify"

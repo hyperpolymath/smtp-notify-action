@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: MPL-2.0
+# This workflow is managed by gh actions-lock.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  ZIG_TARBALL: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+
+jobs:
+  zig-test:
+    name: Unit tests + release targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Zig 0.16.0 (sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zig.tar.xz "$ZIG_TARBALL"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig-toolchain"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-toolchain" --strip-components=1
+          echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
+      - name: Unit tests (scripted sessions + spec golden vectors)
+        run: zig build test
+      - name: Release targets compile (both shipped arches)
+        run: |
+          set -euo pipefail
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+          zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-musl
+
+  fsm-drift:
+    name: FSM drift gate (spec is source of truth)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/stefan-hoeck/idris2-pack@sha256:f0758996a931fb35d9ecb1de273c4d59dabe2a09b433afc7e357f65a08b7e1ff
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Regenerate from the proven spec and diff (with selftest)
+        run: bash scripts/check-fsm-drift.sh --selftest
+
+  e2e-mailpit:
+    name: E2E delivery vs containerized sink
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mailpit:
+        image: axllent/mailpit@sha256:e22dce5b36f93c77082e204a3942fb6b283b7896e057458400a4c88344c3df68 # v1.27
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: 1
+          MP_SMTP_AUTH_ALLOW_INSECURE: 1
+        ports:
+          - 1025:1025
+          - 8025:8025
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Zig 0.16.0 (sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zig.tar.xz "$ZIG_TARBALL"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig-toolchain"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-toolchain" --strip-components=1
+          echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Deliver a mail with a dot-stuffing hazard in the body
+        env:
+          SMTP_ADDR: localhost
+          SMTP_PORT: '1025'
+          SMTP_SECURE: 'false'
+          SMTP_USER: ci
+          SMTP_PASS: ci
+          MAIL_FROM: CI <ci@example.test>
+          MAIL_TO: sink@example.test
+          MAIL_SUBJECT: 'smtp-notify e2e'
+          MAIL_BODY: |
+            line one
+            .a line starting with a dot must survive stuffing
+            last line
+        run: ./zig-out/bin/smtp-notify
+      - name: Assert the sink received it intact
+        run: |
+          set -euo pipefail
+          count="$(curl -fsS http://localhost:8025/api/v1/messages | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["total"])')"
+          [ "$count" = "1" ] || { echo "expected exactly 1 message, sink holds $count" >&2; exit 1; }
+          id="$(curl -fsS http://localhost:8025/api/v1/messages | python3 -c 'import json,sys; print(json.load(sys.stdin)["messages"][0]["ID"])')"
+          raw="$(curl -fsS "http://localhost:8025/api/v1/message/${id}/raw")"
+          echo "$raw" | grep -qx '\.a line starting with a dot must survive stuffing' || {
+            echo "dot-stuffed line did not round-trip; raw message:" >&2
+            echo "$raw" >&2
+            exit 1
+          }
+          echo "$raw" | grep -q '^Subject: smtp-notify e2e' || { echo "subject missing" >&2; exit 1; }
+          echo "e2e ok: delivered, dot-stuffing round-tripped"
+
+  tls-handshake:
+    # Live canary for the vendored TLS client (certificate_request patch,
+    # ziglang/zig#19521): full TLS 1.3 handshake + EHLO + QUIT against a
+    # Google-hosted SMTPS endpoint, which requests a client certificate.
+    # NOT a required context: it depends on an external host.
+    name: Live TLS handshake canary (gmail:465)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Zig 0.16.0 (sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zig.tar.xz "$ZIG_TARBALL"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig-toolchain"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-toolchain" --strip-components=1
+          echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+      - name: Handshake-only probe (no auth, nothing sent)
+        env:
+          SMTP_HANDSHAKE_ONLY: 'true'
+          SMTP_SECURE: 'true'
+          SMTP_ADDR: smtp.gmail.com
+          SMTP_PORT: '465'
+        run: ./zig-out/bin/smtp-notify
