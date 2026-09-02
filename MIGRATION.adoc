@@ -42,6 +42,29 @@ Until then, the migration rule is absolute:
   https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]). Wait
   for it rather than sending credentials in the clear.
 
+== Read this second: Microsoft 365 cannot be reached at all
+
+If your dawidd6 step sends through `smtp.office365.com`, *do not migrate yet*.
+This is a separate blocker from the `secure` change above, and switching to
+port 465 does not work around it.
+
+Both of these were probed on 2026-09-02:
+
+* `smtp.office365.com:587` advertises exactly `AUTH LOGIN XOAUTH2`. It does not
+  offer `AUTH PLAIN`, which is the only mechanism this action implements.
+* `smtp.office365.com:465` has no listener at all, so the implicit-TLS path
+  this action does support cannot connect.
+
+So the two gaps compound: adding STARTTLS alone would still leave the action
+unable to authenticate, and moving to the implicit-TLS port it already supports
+finds nothing listening. Reaching Microsoft 365 requires STARTTLS on 587,
+EHLO capability parsing, and `AUTH LOGIN` together. Tracked in
+https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5].
+
+Google Workspace and most self-hosted submission servers are unaffected:
+`smtp.gmail.com` offers `AUTH PLAIN` on both 587 and 465, and 465 accepts
+implicit TLS, so a Gmail-based dawidd6 step on port 465 ports across today.
+
 == Inputs that transfer unchanged
 
 These nine names are identical in both actions.
@@ -178,9 +201,9 @@ nine-input subset and already on implicit TLS.
 
 == What you give up
 
-STARTTLS and port 587 · HTML bodies · attachments · cc/bcc/reply-to · custom
-headers · non-Linux runners · the ability to skip certificate verification ·
-a large user base to search for answers in.
+Microsoft 365 as a provider · STARTTLS and port 587 · HTML bodies · attachments ·
+cc/bcc/reply-to · custom headers · non-Linux runners · the ability to skip
+certificate verification · a large user base to search for answers in.
 
 There is also no retry or backoff at the SMTP layer. A transient `4xx` from the
 server fails the step immediately rather than being retried. Combined with the
