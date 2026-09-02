@@ -57,13 +57,17 @@ Both of these were probed on 2026-09-02:
 
 So the two gaps compound: adding STARTTLS alone would still leave the action
 unable to authenticate, and moving to the implicit-TLS port it already supports
-finds nothing listening. Reaching Microsoft 365 requires STARTTLS on 587,
-EHLO capability parsing, and `AUTH LOGIN` together. Tracked in
-https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5].
+finds nothing listening. Reaching Microsoft 365 needs three things together:
+STARTTLS on 587, EHLO capability parsing, and `AUTH LOGIN`. Only the first is
+tracked so far, in
+https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]; the
+capability parsing and the extra AUTH mechanism are not yet separate issues.
 
-Google Workspace and most self-hosted submission servers are unaffected:
-`smtp.gmail.com` offers `AUTH PLAIN` on both 587 and 465, and 465 accepts
-implicit TLS, so a Gmail-based dawidd6 step on port 465 ports across today.
+Google Workspace is unaffected, and so is any server that offers `AUTH PLAIN`
+on port 465. `smtp.gmail.com` was probed on the same day and offers `AUTH PLAIN`
+on both 587 and 465, with 465 accepting implicit TLS, so a Gmail-based dawidd6
+step already on port 465 ports across today. Other providers were not probed:
+check yours with `openssl s_client -connect host:465` before switching.
 
 == Inputs that transfer unchanged
 
