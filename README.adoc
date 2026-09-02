@@ -33,9 +33,20 @@ toc::[]
     body: '${{ github.actor }} pushed ${{ github.sha }}'
 ----
 
-The input surface is drop-in for the subset of `dawidd6/action-send-mail`
-this estate uses: `server_address`, `server_port`, `secure`, `username`,
-`password`, `from`, `to`, `subject`, `body`.
+These nine input names match `dawidd6/action-send-mail` exactly:
+`server_address`, `server_port`, `secure`, `username`, `password`, `from`,
+`to`, `subject`, `body`.
+
+Fifteen dawidd6 inputs are *not* implemented: `html_body`, `cc`, `bcc`,
+`reply_to`, `attachments`, `headers`, `priority`, `connection_url`,
+`in_reply_to`, `ignore_cert`, `convert_markdown`, `envelope_from`,
+`envelope_to`, `nodemailerlog`, `nodemailerdebug`. Defaults differ too:
+`server_port` is `465` here rather than `25`, and `body` takes literal text
+only (no `file://`). Treat this as a migration target, not a drop-in
+replacement, and read the input table below before switching.
+
+NOTE: `ignore_cert` is absent deliberately. Certificate verification is always
+on and cannot be turned off by any input.
 
 == Inputs
 
