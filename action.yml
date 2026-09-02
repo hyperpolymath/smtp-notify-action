@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MPL-2.0
 name: 'SMTP Notify'
 description: >-
-  Send a plain-text notification email over implicit TLS (SMTPS).
-  Node-free: one static binary whose SMTP session is formally specified in
-  Idris2 and machine-checked, built in Zig. Drop-in for the
-  dawidd6/action-send-mail input surface the estate uses.
+  Send a plain-text notification email over implicit TLS (SMTPS) from a
+  workflow. Node-free: one static Zig binary with zero dependencies, whose
+  SMTP session is formally specified in Idris2 and machine-checked.
+  Implements nine dawidd6/action-send-mail input names; it is a migration
+  target, not a full replacement.
 author: 'hyperpolymath'
 branding:
   icon: 'mail'
