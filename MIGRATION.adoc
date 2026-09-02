@@ -65,13 +65,15 @@ different port.
 |Literal text only. A `file://` string is sent as the body text.
 
 |`to`
-|Comma-separated, and newline-separated in a YAML block.
+|Documented as "separated with comma". Any other separator is undocumented
+behaviour of the underlying mail library.
 |Splits on comma, space and tab — *not* newline. A multi-line `to:` fails closed
 with a header-injection error rather than mailing a mangled address, so you will
 see it immediately.
 
 |`subject`, `from`
-|Tolerant of an empty value.
+|Declared `required: true`, which GitHub Actions does not enforce at runtime,
+so an empty value reaches the step.
 |Fatal if empty. The step fails rather than sending a headerless message.
 
 |(authentication)
@@ -93,8 +95,8 @@ unauthenticated relay is impossible even against a server that would allow it.
 verification is always on and cannot be disabled by any input. This is the one
 place where parity with dawidd6 would be a regression.
 
-There is no `outputs:` block yet, so a downstream step cannot branch on the
-result. Failure is signalled by a non-zero exit, which fails the job.
+Neither action declares an `outputs:` block, so this is parity rather than a
+regression: in both, failure is signalled by a non-zero exit that fails the job.
 
 == Input that is new here
 
@@ -178,4 +180,14 @@ nine-input subset and already on implicit TLS.
 
 STARTTLS and port 587 · HTML bodies · attachments · cc/bcc/reply-to · custom
 headers · non-Linux runners · the ability to skip certificate verification ·
-step outputs · a large user base to search for answers in.
+a large user base to search for answers in.
+
+There is also no retry or backoff at the SMTP layer. A transient `4xx` from the
+server fails the step immediately rather than being retried. Combined with the
+next point, that makes a transient failure loud but unhelpful.
+
+Server reply text is discarded; only the three-digit code is read. A `535`, a
+`550` and a `554` therefore look alike in the log, so an authentication failure
+and a rejected recipient are not distinguishable from the step output alone.
+This is the action's weakest operational point and is tracked in the issue
+tracker.
