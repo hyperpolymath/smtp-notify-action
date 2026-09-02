@@ -1,0 +1,181 @@
+// SPDX-License-Identifier: MPL-2.0
+= Migrating from dawidd6/action-send-mail
+:toc: macro
+:toclevels: 2
+
+This action is a *migration target*, not a drop-in replacement. Nine input names
+match `dawidd6/action-send-mail` exactly; fifteen are absent; and several shared
+names differ in default or in meaning. Read the drift section before switching a
+working workflow.
+
+toc::[]
+
+== Read this first: the one change that can leak credentials
+
+`secure` does not mean the same thing in both actions.
+
+[cols="1,2,2"]
+|===
+|`secure` |dawidd6/action-send-mail |smtp-notify-action
+
+|`true`
+|Implicit TLS from the first byte (SMTPS, normally port 465).
+|Same. Implicit TLS from the first byte.
+
+|`false`
+|Plain connection that is *upgraded via STARTTLS* when the server offers it.
+This is the normal path for port 587 submission.
+|*No STARTTLS support at all.* The session stays in plaintext, and AUTH PLAIN
+sends your username and password base64-encoded in the clear.
+|===
+
+Anything other than the exact string `true` — `1`, `yes`, `TRUE`, `on` — takes
+the plaintext path. This is tracked as a fail-open defect in
+https://github.com/hyperpolymath/smtp-notify-action/issues/1[issue #1] and will
+be changed to fail closed.
+
+Until then, the migration rule is absolute:
+
+* If your dawidd6 step used `secure: true` on port 465, it ports across unchanged.
+* If it used `secure: false` on port 587, *do not port it yet*. STARTTLS is not
+  implemented (tracked in
+  https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]). Wait
+  for it rather than sending credentials in the clear.
+
+== Inputs that transfer unchanged
+
+These nine names are identical in both actions.
+
+`server_address` · `server_port` · `secure` · `username` · `password` ·
+`from` · `to` · `subject` · `body`
+
+== Drift inside those nine names
+
+[cols="1,2,2"]
+|===
+|Input |dawidd6 |Here
+
+|`server_port`
+|Defaults to `25`.
+|Defaults to `465`. If you relied on the default, you were talking to a
+different port.
+
+|`body`
+|Accepts a `file://` URL to read the body from a file.
+|Literal text only. A `file://` string is sent as the body text.
+
+|`to`
+|Comma-separated, and newline-separated in a YAML block.
+|Splits on comma, space and tab — *not* newline. A multi-line `to:` fails closed
+with a header-injection error rather than mailing a mangled address, so you will
+see it immediately.
+
+|`subject`, `from`
+|Tolerant of an empty value.
+|Fatal if empty. The step fails rather than sending a headerless message.
+
+|(authentication)
+|Optional. Omitting `username`/`password` attempts unauthenticated relay.
+|Mandatory. AUTH is a required row in the protocol state machine, so
+unauthenticated relay is impossible even against a server that would allow it.
+|===
+
+== Inputs that do not exist here
+
+`connection_url` · `html_body` · `cc` · `bcc` · `reply_to` · `in_reply_to` ·
+`ignore_cert` · `convert_markdown` · `attachments` · `priority` · `headers` ·
+`nodemailerlog` · `nodemailerdebug` · `envelope_from` · `envelope_to`
+
+`cc`, `bcc`, `reply_to` and `headers` are planned
+(https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]).
+
+`ignore_cert` is *deliberately* absent and will not be added. Certificate
+verification is always on and cannot be disabled by any input. This is the one
+place where parity with dawidd6 would be a regression.
+
+There is no `outputs:` block yet, so a downstream step cannot branch on the
+result. Failure is signalled by a non-zero exit, which fails the job.
+
+== Input that is new here
+
+[cols="1,3"]
+|===
+|`handshake_only` |`true` connects, completes the TLS handshake, sends `EHLO`
+and `QUIT` without sending mail. Use it to prove reachability and TLS
+configuration from a runner without delivering a test message.
+|===
+
+== Runner support
+
+*Linux x86_64 and Linux arm64 only.*
+
+macOS arm64 exits cleanly with an "unsupported runner architecture" message.
+Windows and Intel macOS are *not* handled cleanly: both report `x86_64` from
+`uname -m`, so the installer downloads the Linux binary, the SHA-256 check
+passes because the file is intact, and the step then dies at `exec` with a
+confusing exec-format error. Tracked in
+https://github.com/hyperpolymath/smtp-notify-action/issues/2[issue #2].
+
+If your notify job runs on `windows-latest` or `macos-13`, stay on dawidd6 for
+now.
+
+== Worked example
+
+.Before
+[source,yaml]
+----
+- uses: dawidd6/action-send-mail@v3
+  with:
+    server_address: smtp.example.org
+    server_port: 465
+    secure: true
+    username: ${{ secrets.SMTP_USERNAME }}
+    password: ${{ secrets.SMTP_PASSWORD }}
+    from: GitHub Push <ci@example.org>
+    to: you@example.org,teammate@example.org
+    subject: Push to ${{ github.repository }}
+    body: ${{ github.actor }} pushed ${{ github.sha }}
+----
+
+.After
+[source,yaml]
+----
+- uses: hyperpolymath/smtp-notify-action@v0.1.0
+  with:
+    server_address: smtp.example.org
+    server_port: 465
+    secure: true
+    username: ${{ secrets.SMTP_USERNAME }}
+    password: ${{ secrets.SMTP_PASSWORD }}
+    from: GitHub Push <ci@example.org>
+    to: you@example.org,teammate@example.org
+    subject: Push to ${{ github.repository }}
+    body: ${{ github.actor }} pushed ${{ github.sha }}
+----
+
+Only the `uses:` line changes, because this example was already inside the
+nine-input subset and already on implicit TLS.
+
+== What you gain
+
+* *No Node runtime.* One static musl binary with `.dependencies = .{}` — zero
+  third-party dependencies, so no transitive advisory surface.
+* *The binary is SHA-256 pinned inside `action.yml`*, verified on every run.
+* *The SMTP session is specified in Idris2 and machine-checked.* Be precise
+  about what that means: the protocol state machine is a table proved
+  deterministic, terminating and correctly ordered, and dot-stuffing carries a
+  universally-quantified safety theorem. Header-value validation is covered by
+  golden vectors, not yet by a theorem
+  (https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]).
+  The Idris2 layer is a specification and code generator; it does not ship in
+  the binary.
+* *Plain text only*, by construction. No HTML, no remote images, no tracking
+  pixel, and clean in a screen reader.
+* *Fails loudly.* No `continue-on-error`, no `|| true`, no `set +e` anywhere in
+  the action.
+
+== What you give up
+
+STARTTLS and port 587 · HTML bodies · attachments · cc/bcc/reply-to · custom
+headers · non-Linux runners · the ability to skip certificate verification ·
+step outputs · a large user base to search for answers in.
