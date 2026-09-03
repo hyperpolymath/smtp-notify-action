@@ -13,6 +13,10 @@ machine-checked proofs) and **built in Zig** (0.16.0, static musl,
 byte-reproducible). The generated state table in the binary is diffed against
 the proven specification by CI on every push.
 
+Coming from `dawidd6/action-send-mail`? Read
+link:MIGRATION.adoc[`MIGRATION.adoc`] first: nine input names match exactly,
+fifteen are absent, and `secure` differs in meaning.
+
 toc::[]
 
 == Usage
@@ -20,7 +24,7 @@ toc::[]
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.1.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.2.0
   with:
     server_address: ${{ secrets.SMTP_HOST }}
     server_port: 465
@@ -56,9 +60,13 @@ on and cannot be turned off by any input.
 
 |`server_address` |_required_ |SMTP server host name.
 |`server_port` |`465` |SMTP server port.
-|`secure` |`true` |`true` = implicit TLS from the first byte (SMTPS).
-Anything else = plaintext, intended only for containerized test sinks.
-STARTTLS is not yet supported (planned for v1.1).
+|`secure` |`true` |Fail-closed transport selection, five accepted values.
+`true` or `implicit` = implicit TLS from the first byte (SMTPS).
+`false` or `starttls` = STARTTLS, which is accepted but *not yet implemented*,
+so the step fails with a message rather than downgrading
+(https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]).
+`plaintext` = no TLS, intended only for containerized test sinks. Any other
+value is rejected outright.
 |`username` |— |AUTH PLAIN username.
 |`password` |— |AUTH PLAIN password. Passed to the binary via the
 environment, never argv, so it cannot leak into process listings.
@@ -68,6 +76,10 @@ environment, never argv, so it cannot leak into process listings.
 |`body` |— |Plain-text body; dot-stuffed on the wire per RFC 5321 §4.5.2.
 |`handshake_only` |`false` |`true` = connect, TLS handshake, `EHLO`, `QUIT` —
 no auth, nothing sent. For canary/CI verification against a real server.
+|`timeout_seconds` |`60` |Whole-run deadline. A watchdog bounds connection,
+handshake and every read and write, and fails the step with a diagnostic if it
+is exceeded. Deliberately whole-run rather than per-operation; see
+link:BUSTFILE.adoc[`BUSTFILE.adoc`].
 |===
 
 == Security properties
@@ -138,6 +150,19 @@ Pin by commit SHA (the estate's actions allowlist requires it). Tags `vX.Y.Z`
 mark the commits whose `action.yml` pins match the release assets of the same
 version. The asset URL inside `action.yml` names its own tag, so an action ref
 always downloads the binary generation it was reviewed with.
+
+== Further reading
+
+* link:MIGRATION.adoc[`MIGRATION.adoc`] — moving a `dawidd6/action-send-mail`
+  step across: which inputs transfer, which have drifted, and the two
+  blockers (Microsoft 365, STARTTLS) that mean some workflows should not move
+  yet.
+* link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] — what is wrong with *this*
+  code, stated by us rather than discovered by you, plus the exact boundary of
+  the proof claim and why no CVE has been assigned.
+* link:BUSTFILE.adoc[`BUSTFILE.adoc`] — defects in things we depend on but do
+  not control, each with a hazard-control disposition and the event that would
+  let us delete the workaround.
 
 == License
 

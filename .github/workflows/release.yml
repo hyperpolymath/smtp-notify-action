@@ -38,6 +38,27 @@ jobs:
           zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux-musl
           cp zig-out/bin/smtp-notify dist/smtp-notify-aarch64-linux-musl
 
+      - name: Verify action.yml downloads the tag being released
+        # The hash gate below proves the binaries match action.yml's pins. It
+        # cannot prove action.yml points at THIS release: bumping the pins but
+        # forgetting the asset URL publishes a v0.2.0 action.yml that fetches
+        # v0.1.0 assets, whose hashes then fail `sha256sum -c` on the
+        # consumer's runner instead of here. Close that half explicitly, so the
+        # invariant README's "Versioning" section states is actually enforced.
+        run: |
+          set -euo pipefail
+          mapfile -t url_vers < <(grep -oP 'releases/download/\K[^/]+' action.yml)
+          if [ "${#url_vers[@]}" != "1" ]; then
+            echo "expected exactly 1 releases/download/<tag>/ URL in action.yml, found ${#url_vers[@]}" >&2
+            exit 1
+          fi
+          if [ "${url_vers[0]}" != "${GITHUB_REF_NAME}" ]; then
+            echo "action.yml downloads assets from '${url_vers[0]}' but the tag being released is '${GITHUB_REF_NAME}'" >&2
+            echo "bump the asset URL in action.yml, and its two sha256 pins, in the tagged commit" >&2
+            exit 1
+          fi
+          echo "asset URL names the released tag: ${GITHUB_REF_NAME}"
+
       - name: Verify rebuilt hashes equal the pins in action.yml
         # THE release gate. The binaries are byte-reproducible from source, so
         # a fresh CI rebuild must hash to exactly what action.yml pins. Any

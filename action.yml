@@ -21,9 +21,16 @@ inputs:
     default: '465'
   secure:
     description: >-
-      "true" (default) = implicit TLS from the first byte (SMTPS, port 465).
-      Anything else = plaintext, intended only for containerized test sinks.
-      STARTTLS is not yet supported.
+      Transport selection, fail-closed. "true" (default) or "implicit" =
+      implicit TLS from the first byte (SMTPS, normally port 465). "false" or
+      "starttls" = STARTTLS on a plain connection, which is accepted but NOT
+      YET IMPLEMENTED, so the step fails with a clear message rather than
+      silently falling back to plaintext (issue #5). "plaintext" = no TLS at
+      all, which sends the password base64-encoded in the clear; use it only
+      against a containerized test sink. Any other value is rejected outright.
+      Note the difference from dawidd6/action-send-mail, where "false" means
+      "STARTTLS when the server offers it": here it fails instead of
+      downgrading, because an unrecognised value used to mean plaintext.
     required: false
     default: 'true'
   username:
@@ -58,6 +65,15 @@ inputs:
       For canary/CI verification against a real server without delivering mail.
     required: false
     default: 'false'
+  timeout_seconds:
+    description: >-
+      Whole-run deadline in seconds. A watchdog bounds the entire run —
+      connection, TLS handshake, and every read and write — and fails the step
+      with a diagnostic if it is exceeded. This is deliberately a whole-run
+      deadline rather than a per-operation one: see BUSTFILE.adoc,
+      BUST-2026-001 and BUST-2026-002.
+    required: false
+    default: '60'
 
 runs:
   using: 'composite'
@@ -71,6 +87,20 @@ runs:
         # are byte-reproducible from source (stripped static musl builds,
         # zig 0.16.0); the release workflow rebuilds them and refuses to
         # publish unless the hashes match these pins.
+        # Runner OS gate, BEFORE the architecture gate. Windows and Intel macOS
+        # both report "x86_64" from `uname -m`, so an arch-only gate downloads
+        # the Linux binary, passes the SHA-256 check (the file is intact), and
+        # then dies at exec with a confusing exec-format error. Gate on the OS
+        # first so the failure names the real cause (issue #2).
+        case "$(uname -s)" in
+          Linux) ;;
+          *)
+            echo "smtp-notify: unsupported runner OS: $(uname -s)." >&2
+            echo "smtp-notify: only Linux runners are supported; the released" >&2
+            echo "smtp-notify: binaries are static linux-musl builds." >&2
+            exit 1
+            ;;
+        esac
         case "$(uname -m)" in
           x86_64)
             asset="smtp-notify-x86_64-linux-musl"
@@ -97,6 +127,7 @@ runs:
         SMTP_PORT: ${{ inputs.server_port }}
         SMTP_SECURE: ${{ inputs.secure }}
         SMTP_HANDSHAKE_ONLY: ${{ inputs.handshake_only }}
+        SMTP_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
         SMTP_USER: ${{ inputs.username }}
         SMTP_PASS: ${{ inputs.password }}
         MAIL_FROM: ${{ inputs.from }}
