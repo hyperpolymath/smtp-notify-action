@@ -163,6 +163,14 @@ always downloads the binary generation it was reviewed with.
 * link:BUSTFILE.adoc[`BUSTFILE.adoc`] — defects in things we depend on but do
   not control, each with a hazard-control disposition and the event that would
   let us delete the workaround.
+* link:.github/SECURITY.md[`SECURITY.md`] — how to report a vulnerability, what
+  the action does and does not protect, and the three things worth knowing about
+  the vendored TLS client before adopting.
+* link:.github/CONTRIBUTING.md[`CONTRIBUTING.md`] — building against the pinned
+  Zig, the three files not to edit by hand, and which register a defect belongs
+  in.
+* link:CHANGELOG.adoc[`CHANGELOG.adoc`] — what changed, and what is on `main` but
+  not yet in a released binary.
 
 == License
 

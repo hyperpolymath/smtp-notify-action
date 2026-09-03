@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: MPL-2.0
+= Changelog
+:toc: macro
+:toclevels: 2
+
+All notable changes to this action are recorded here. The format follows
+https://keepachangelog.com/en/1.1.0/[Keep a Changelog]; versions follow
+https://semver.org/spec/v2.0.0.html[Semantic Versioning].
+
+The unit of release is the *action ref*: the tag or commit you pin determines both
+`action.yml` and, through the SHA-256 pins inside it, the exact binary that runs.
+
+toc::[]
+
+== Unreleased
+
+[IMPORTANT]
+====
+`main` is not a release, and pinning `@main` is not supported.
+
+Everything in this section is present in the *source*, but `action.yml` on `main`
+still downloads the *v0.1.0* binary and still carries the v0.1.0 SHA-256 pins. The
+release workflow verifies rebuilt binaries against those pins and cannot mint new
+ones, so correct hashes for the next version can only exist in that version's own
+release commit.
+
+The practical consequence: on `main`, `secure: false` is *described* as failing
+closed but would still take the v0.1.0 plaintext path, because the described
+behaviour is not in the binary being fetched. Consumers pinned to `v0.1.0` or to a
+commit SHA are unaffected. This window closes when v0.2.0 is tagged.
+====
+
+=== Changed
+
+* *`secure` is now fail-closed.* Transport selection accepts `true`/`implicit`
+  (SMTPS), `false`/`starttls`, and `plaintext`. Any other value is rejected
+  outright. `false` fails with a clear message because STARTTLS is not yet
+  implemented, rather than silently downgrading. This is a deliberate
+  incompatibility with `dawidd6/action-send-mail`, where `false` means "STARTTLS
+  when the server offers it"; previously an unrecognised value here meant
+  plaintext.
+* Sending in the clear now requires typing `plaintext` explicitly.
+
+=== Added
+
+* *Runner OS gate*, checked before the architecture gate. Windows and Intel macOS
+  both report `x86_64` from `uname -m`, so an architecture-only gate downloaded the
+  Linux binary, passed the SHA-256 check because the file was intact, and then died
+  at `exec` with a confusing exec-format error. The failure now names the real
+  cause.
+* *Whole-run watchdog*, bounding connection, TLS handshake, and every read and
+  write, exposed as `timeout_seconds` (default 60). It replaces a per-operation
+  connect deadline that Zig 0.16.0 cannot honour — see `BUSTFILE.adoc`,
+  BUST-2026-001 and BUST-2026-002. It is a whole-run deadline, not an idle timer.
+* `BUSTFILE.adoc` — defects in dependencies, each with a hazard-control
+  disposition and a re-check trigger.
+* `KNOWN-DEFECTS.adoc` — our own defects, published rather than waited upon,
+  including the exact scope of the formal claims.
+* `MIGRATION.adoc` — migration guide from `dawidd6/action-send-mail` with the full
+  input compatibility table.
+* Community health: `.github/SECURITY.md` and `.github/CONTRIBUTING.md`, and this
+  changelog.
+
+=== Fixed
+
+* Server reply text is now surfaced in diagnostics, so a rejection says what the
+  server said instead of only that it failed.
+* CI: strip CRLF from the mailpit raw fetch before whole-line greps, which had
+  made the end-to-end assertions unreliable.
+
+== v0.1.0 — 2026-08-31
+
+Initial release.
+
+* Sends a plain-text notification email over implicit TLS (SMTPS), by default on
+  port 465.
+* One static Zig binary, `.dependencies = .{}`, no Node runtime. Released as
+  `x86_64-linux-musl` and `aarch64-linux-musl` builds, pinned by SHA-256 in
+  `action.yml` and reproduced from source by the release workflow.
+* The SMTP session is specified in Idris2 and machine-checked. Dot-stuffing is a
+  theorem over all inputs; the protocol state machine's determinism, termination
+  and ordering are proved over the eight rows that exist.
+* Implements nine `dawidd6/action-send-mail` input names. It is a migration
+  target, not a full replacement.
+* Certificate verification is always on. There is no `ignore_cert` input, by
+  design.
+* Linux runners only; the released binaries are static `linux-musl` builds.
