@@ -78,7 +78,7 @@ jobs:
         env:
           SMTP_ADDR: localhost
           SMTP_PORT: '1025'
-          SMTP_SECURE: 'false'
+          SMTP_SECURE: 'plaintext'
           SMTP_USER: ci
           SMTP_PASS: ci
           MAIL_FROM: CI <ci@example.test>
@@ -92,9 +92,9 @@ jobs:
       - name: Assert the sink received it intact
         run: |
           set -euo pipefail
-          count="$(curl -fsS http://localhost:8025/api/v1/messages | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["total"])')"
+          count="$(curl -fsS http://localhost:8025/api/v1/messages | jq -er '.total')"
           [ "$count" = "1" ] || { echo "expected exactly 1 message, sink holds $count" >&2; exit 1; }
-          id="$(curl -fsS http://localhost:8025/api/v1/messages | python3 -c 'import json,sys; print(json.load(sys.stdin)["messages"][0]["ID"])')"
+          id="$(curl -fsS http://localhost:8025/api/v1/messages | jq -er '.messages[0].ID')"
           # The raw endpoint returns SMTP wire format: CRLF line endings.
           # Strip the CRs once here so the whole-line (-x) greps below can
           # match; without this the invisible trailing \r fails every -x.

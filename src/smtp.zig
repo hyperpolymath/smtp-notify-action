@@ -41,6 +41,57 @@ pub const SessionError = error{
 
 pub const Error = SessionError || std.Io.Reader.DelimiterError || std.Io.Writer.Error;
 
+/// How much of a server reply is retained. Enough for a multi-line EHLO
+/// capability list from a large provider; anything past it is truncated
+/// rather than allocated for, and the truncation is reported, not hidden.
+pub const reply_text_max = 2048;
+
+/// A reply may not carry more continuation lines than this. Without a cap a
+/// server that never sends a final line holds the client in `readReply`
+/// forever, which no timeout at the transport layer can distinguish from a
+/// merely slow server.
+const reply_line_max = 128;
+
+/// One SMTP reply: its three-digit code plus the server's own words.
+///
+/// Retaining the text is what makes a 535, a 550 and a 554 different things
+/// in the log instead of three indistinguishable failures (#3), and it is the
+/// prerequisite for reading EHLO capabilities (#9) rather than guessing at
+/// them. Multi-line replies keep every line, '\n'-separated, with the code
+/// and its separator stripped.
+pub const Reply = struct {
+    code: u16,
+    text: []const u8,
+    /// The server said more than `reply_text_max`; `text` is a prefix.
+    truncated: bool = false,
+};
+
+/// Carries the last reply out of a failed session so the caller can print the
+/// server's explanation. Only ever holds bytes the *server* sent — no
+/// credential can reach it.
+pub const Diagnostic = struct {
+    /// The phase whose reply was last read. `code == 0` means no reply was
+    /// read at all, so the failure preceded the first one.
+    phase: fsm.Phase = .connect,
+    code: u16 = 0,
+    buf: [reply_text_max]u8 = undefined,
+    len: usize = 0,
+    truncated: bool = false,
+
+    pub fn text(d: *const Diagnostic) []const u8 {
+        return d.buf[0..d.len];
+    }
+
+    fn record(d: *Diagnostic, phase: fsm.Phase, reply: Reply) void {
+        d.phase = phase;
+        d.code = reply.code;
+        const n = @min(reply.text.len, d.buf.len);
+        @memcpy(d.buf[0..n], reply.text[0..n]);
+        d.len = n;
+        d.truncated = reply.truncated or n < reply.text.len;
+    }
+};
+
 /// The byte streams a session rides on.
 pub const Wire = struct {
     r: *std.Io.Reader,
@@ -59,6 +110,12 @@ pub const Wire = struct {
 /// Walk the generated script from .connect to .done, sending each row's
 /// action and demanding a listed reply code before advancing.
 pub fn runSession(cfg: Config, wire: Wire) Error!void {
+    return runSessionDiag(cfg, wire, null);
+}
+
+/// As `runSession`, but records the last reply read into `diag` so a failure
+/// can be reported with the server's own explanation rather than a bare code.
+pub fn runSessionDiag(cfg: Config, wire: Wire, diag: ?*Diagnostic) Error!void {
     const r = wire.r;
     const w = wire.w;
     if (!message.headerValueOk(cfg.subject)) return error.HeaderInjection;
@@ -77,14 +134,16 @@ pub fn runSession(cfg: Config, wire: Wire) Error!void {
 
     var phase: fsm.Phase = .connect;
     var rcpt_index: usize = 0;
+    var reply_buf: [reply_text_max]u8 = undefined;
     while (phase != .done) {
         // Coverage of every non-terminal phase is proven in the spec
         // (deterministicCoverage), so a missing row is unreachable.
         const step = lookupStep(phase) orelse return error.ProtocolError;
         try sendAction(cfg, step.send, rcpt_index, w);
         try wire.flush();
-        const code = try readReply(r);
-        try checkReply(step, code);
+        const reply = try readReply(r, &reply_buf);
+        if (diag) |d| d.record(phase, reply);
+        try checkReply(step, reply.code);
         if (step.repeats) {
             rcpt_index += 1;
             if (rcpt_index < cfg.recipients.len) continue; // same row, next recipient
@@ -114,19 +173,54 @@ fn sendAction(cfg: Config, action: fsm.Action, rcpt_index: usize, w: *std.Io.Wri
     }
 }
 
-/// Read one (possibly multi-line) reply and return its 3-digit code.
+/// Read one (possibly multi-line) reply: its 3-digit code, plus the server's
+/// own words accumulated into `buf`.
+///
 /// Continuation lines have '-' as the 4th character ("250-..."); the final
-/// line has ' ' or nothing after the code.
-fn readReply(r: *std.Io.Reader) (SessionError || std.Io.Reader.DelimiterError)!u16 {
+/// line has ' ' or nothing after the code. Every line's text is kept,
+/// '\n'-separated, with the code and its separator stripped. That is what
+/// makes a 535 distinguishable from a 550 in the log, and it is the same
+/// mechanism an EHLO capability list will be read through.
+fn readReply(r: *std.Io.Reader, buf: []u8) (SessionError || std.Io.Reader.DelimiterError)!Reply {
+    var len: usize = 0;
+    var truncated = false;
+    var lines: usize = 0;
     while (true) {
         // Inclusive, not Exclusive: the Exclusive variant leaves the '\n' in
         // the stream, so the next read would see an empty line.
         const raw = try r.takeDelimiterInclusive('\n');
         const line = std.mem.trimEnd(u8, raw, "\r\n");
         if (line.len < 3) return error.ReplyMalformed;
+        // Three literal ASCII digits. `parseInt` on its own accepts "+12"
+        // and a leading space, so a line that is not a reply line at all
+        // could otherwise be read as one.
+        for (line[0..3]) |c| {
+            if (c < '0' or c > '9') return error.ReplyMalformed;
+        }
         const code = std.fmt.parseInt(u16, line[0..3], 10) catch return error.ReplyMalformed;
-        if (line.len >= 4 and line[3] == '-') continue;
-        return code;
+        // RFC 5321 §4.2.1: the 4th character is '-' on a continuation line
+        // and ' ' on the last one. Anything else is malformed, not a reply
+        // to be silently accepted.
+        const more = line.len >= 4 and line[3] == '-';
+        if (line.len >= 4 and !more and line[3] != ' ') return error.ReplyMalformed;
+
+        const text = if (line.len > 4) line[4..] else line[0..0];
+        if (len > 0 and len < buf.len) {
+            buf[len] = '\n';
+            len += 1;
+        }
+        const n = @min(text.len, buf.len - len);
+        @memcpy(buf[len..][0..n], text[0..n]);
+        len += n;
+        if (n < text.len) truncated = true;
+
+        if (!more) return .{ .code = code, .text = buf[0..len], .truncated = truncated };
+
+        lines += 1;
+        // A server that never sends a final line would otherwise hold us
+        // here forever, which no transport timeout can tell apart from a
+        // server that is merely slow.
+        if (lines >= reply_line_max) return error.ReplyMalformed;
     }
 }
 
@@ -324,4 +418,76 @@ test "angleAddr extraction" {
 
 test {
     _ = message; // pull in message.zig's golden-vector tests
+}
+
+// ---------------------------------------------------------------------------
+// Tests: reply text and diagnostics (issue #3).
+// ---------------------------------------------------------------------------
+
+fn readOne(replies: []const u8, buf: []u8) !Reply {
+    var r: std.Io.Reader = .fixed(replies);
+    return readReply(&r, buf);
+}
+
+test "readReply keeps the server's words, not only the code" {
+    var buf: [reply_text_max]u8 = undefined;
+    const reply = try readOne("535 5.7.8 Username and Password not accepted\r\n", &buf);
+    try std.testing.expectEqual(@as(u16, 535), reply.code);
+    try std.testing.expectEqualStrings("5.7.8 Username and Password not accepted", reply.text);
+    try std.testing.expect(!reply.truncated);
+}
+
+test "readReply accumulates every line of a multi-line reply" {
+    var buf: [reply_text_max]u8 = undefined;
+    const reply = try readOne(
+        "250-mail.example.org\r\n250-PIPELINING\r\n250-STARTTLS\r\n250 AUTH LOGIN XOAUTH2\r\n",
+        &buf,
+    );
+    try std.testing.expectEqual(@as(u16, 250), reply.code);
+    try std.testing.expectEqualStrings(
+        "mail.example.org\nPIPELINING\nSTARTTLS\nAUTH LOGIN XOAUTH2",
+        reply.text,
+    );
+    try std.testing.expect(!reply.truncated);
+}
+
+test "readReply refuses an endless continuation" {
+    var buf: [reply_text_max]u8 = undefined;
+    var stream: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&stream);
+    for (0..reply_line_max + 2) |_| try w.writeAll("250-x\r\n");
+    try std.testing.expectError(error.ReplyMalformed, readOne(stream[0..w.end], &buf));
+}
+
+test "readReply rejects a line whose code is not three digits" {
+    var buf: [reply_text_max]u8 = undefined;
+    try std.testing.expectError(error.ReplyMalformed, readOne("+12 hello\r\n", &buf));
+    try std.testing.expectError(error.ReplyMalformed, readOne(" 50 hello\r\n", &buf));
+    try std.testing.expectError(error.ReplyMalformed, readOne("250x hello\r\n", &buf));
+}
+
+test "readReply reports truncation rather than hiding it" {
+    var small: [8]u8 = undefined;
+    const reply = try readOne("250 abcdefghijklmnop\r\n", &small);
+    try std.testing.expectEqual(@as(u16, 250), reply.code);
+    try std.testing.expectEqualStrings("abcdefgh", reply.text);
+    try std.testing.expect(reply.truncated);
+}
+
+test "runSessionDiag carries the failing reply out to the caller" {
+    const replies =
+        "220 mail.example.org ESMTP\r\n" ++
+        "250 mail.example.org\r\n" ++
+        "535 5.7.8 Username and Password not accepted\r\n";
+    var r: std.Io.Reader = .fixed(replies);
+    var out: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(
+        error.PermanentFailure,
+        runSessionDiag(test_cfg, .{ .r = &r, .w = &w }, &diag),
+    );
+    try std.testing.expectEqual(fsm.Phase.auth, diag.phase);
+    try std.testing.expectEqual(@as(u16, 535), diag.code);
+    try std.testing.expectEqualStrings("5.7.8 Username and Password not accepted", diag.text());
 }

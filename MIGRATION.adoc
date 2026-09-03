@@ -8,11 +8,17 @@ match `dawidd6/action-send-mail` exactly; fifteen are absent; and several shared
 names differ in default or in meaning. Read the drift section before switching a
 working workflow.
 
+NOTE: This guide describes *v0.2.0*. The `secure` input changed behaviour in
+that release: v0.1.0 treated any unrecognised value as plaintext, v0.2.0
+rejects it. Pin `@v0.2.0` or later, not `@v0.1.0`, or the behaviour described
+below will not be the behaviour you get.
+
 toc::[]
 
-== Read this first: the one change that can leak credentials
+== Read this first: `secure` means something different here
 
-`secure` does not mean the same thing in both actions.
+`secure` does not mean the same thing in both actions, and the difference is
+one of behaviour rather than of naming.
 
 [cols="1,2,2"]
 |===
@@ -25,22 +31,32 @@ toc::[]
 |`false`
 |Plain connection that is *upgraded via STARTTLS* when the server offers it.
 This is the normal path for port 587 submission.
-|*No STARTTLS support at all.* The session stays in plaintext, and AUTH PLAIN
-sends your username and password base64-encoded in the clear.
+|STARTTLS is *selected but not yet implemented*, so the step *fails* with a
+message naming the reason. It never falls back to plaintext.
 |===
 
-Anything other than the exact string `true` — `1`, `yes`, `TRUE`, `on` — takes
-the plaintext path. This is tracked as a fail-open defect in
-https://github.com/hyperpolymath/smtp-notify-action/issues/1[issue #1] and will
-be changed to fail closed.
+The input is fail-closed. It accepts exactly five values — `true` and
+`implicit` for implicit TLS, `false` and `starttls` for STARTTLS, and
+`plaintext` for no TLS at all — and rejects anything else outright. A typo such
+as `1`, `yes`, `TRUE` or `on` fails the step rather than quietly selecting a
+transport.
 
-Until then, the migration rule is absolute:
+This is a deliberate divergence from dawidd6, where `false` means "STARTTLS
+when the server offers it". Here it fails instead of downgrading. The reason
+for the strictness is historical: v0.1.0 treated *any* unrecognised value as
+plaintext, so a typo could put the username and password on the wire
+base64-encoded in a session with no encryption. That was
+https://github.com/hyperpolymath/smtp-notify-action/issues/1[issue #1] and it
+is fixed in v0.2.0. `plaintext` survives as an explicit opt-in, intended only
+for a containerized test sink.
+
+The migration rule follows from that:
 
 * If your dawidd6 step used `secure: true` on port 465, it ports across unchanged.
-* If it used `secure: false` on port 587, *do not port it yet*. STARTTLS is not
-  implemented (tracked in
+* If it used `secure: false` on port 587, it will *fail loudly* here rather than
+  send anything, because STARTTLS is not implemented (tracked in
   https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]). Wait
-  for it rather than sending credentials in the clear.
+  for that issue; do not reach for `plaintext` as a substitute.
 
 == Read this second: Microsoft 365 cannot be reached at all
 
@@ -58,10 +74,15 @@ Both of these were probed on 2026-09-02:
 So the two gaps compound: adding STARTTLS alone would still leave the action
 unable to authenticate, and moving to the implicit-TLS port it already supports
 finds nothing listening. Reaching Microsoft 365 needs three things together:
-STARTTLS on 587, EHLO capability parsing, and `AUTH LOGIN`. Only the first is
-tracked so far, in
-https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]; the
-capability parsing and the extra AUTH mechanism are not yet separate issues.
+STARTTLS on 587, EHLO capability parsing, and `AUTH LOGIN`. All three are now
+tracked separately:
+https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]
+(STARTTLS),
+https://github.com/hyperpolymath/smtp-notify-action/issues/9[issue #9]
+(EHLO capability parsing) and
+https://github.com/hyperpolymath/smtp-notify-action/issues/10[issue #10]
+(`AUTH LOGIN`). Migrating an Office 365 sender needs all three closed, not
+just the first.
 
 Google Workspace is unaffected, and so is any server that offers `AUTH PLAIN`
 on port 465. `smtp.gmail.com` was probed on the same day and offers `AUTH PLAIN`
@@ -138,15 +159,16 @@ configuration from a runner without delivering a test message.
 
 *Linux x86_64 and Linux arm64 only.*
 
-macOS arm64 exits cleanly with an "unsupported runner architecture" message.
-Windows and Intel macOS are *not* handled cleanly: both report `x86_64` from
-`uname -m`, so the installer downloads the Linux binary, the SHA-256 check
-passes because the file is intact, and the step then dies at `exec` with a
-confusing exec-format error. Tracked in
-https://github.com/hyperpolymath/smtp-notify-action/issues/2[issue #2].
+Every other runner fails with a message naming the cause. The installer gates
+on operating system before architecture, because Windows and Intel macOS both
+report `x86_64` from `uname -m`: an architecture-only gate downloaded the Linux
+binary, passed the SHA-256 check (the file was intact — it was simply the wrong
+file), and died at `exec` with an exec-format error that named nothing useful.
+That was https://github.com/hyperpolymath/smtp-notify-action/issues/2[issue #2],
+fixed in v0.2.0; such a runner now stops at the OS gate saying so.
 
-If your notify job runs on `windows-latest` or `macos-13`, stay on dawidd6 for
-now.
+If your notify job runs on `windows-latest` or `macos-13`, stay on dawidd6: the
+failure is now legible, but it is still a failure.
 
 == Worked example
 
@@ -169,7 +191,7 @@ now.
 .After
 [source,yaml]
 ----
-- uses: hyperpolymath/smtp-notify-action@v0.1.0
+- uses: hyperpolymath/smtp-notify-action@v0.2.0
   with:
     server_address: smtp.example.org
     server_port: 465
@@ -194,10 +216,10 @@ nine-input subset and already on implicit TLS.
   about what that means: the protocol state machine is a table proved
   deterministic, terminating and correctly ordered, and dot-stuffing carries a
   universally-quantified safety theorem. Header-value validation is covered by
-  golden vectors, not yet by a theorem
-  (https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]).
-  The Idris2 layer is a specification and code generator; it does not ship in
-  the binary.
+  golden vectors, not yet by a theorem, so an injection vector outside the
+  corpus is not excluded by proof; the exact boundary of the claim is set out
+  in link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`]. The Idris2 layer is a
+  specification and code generator; it does not ship in the binary.
 * *Plain text only*, by construction. No HTML, no remote images, no tracking
   pixel, and clean in a screen reader.
 * *Fails loudly.* No `continue-on-error`, no `|| true`, no `set +e` anywhere in
@@ -210,11 +232,10 @@ cc/bcc/reply-to · custom headers · non-Linux runners · the ability to skip
 certificate verification · a large user base to search for answers in.
 
 There is also no retry or backoff at the SMTP layer. A transient `4xx` from the
-server fails the step immediately rather than being retried. Combined with the
-next point, that makes a transient failure loud but unhelpful.
+server fails the step immediately rather than being retried.
 
-Server reply text is discarded; only the three-digit code is read. A `535`, a
-`550` and a `554` therefore look alike in the log, so an authentication failure
-and a rejected recipient are not distinguishable from the step output alone.
-This is the action's weakest operational point and is tracked in the issue
-tracker.
+The reply text itself is not given up. Since v0.2.0 the failure message carries
+the server's own words along with the code and the protocol step that produced
+it, so a `535`, a `550` and a `554` are distinguishable in the log
+(https://github.com/hyperpolymath/smtp-notify-action/issues/3[issue #3]). Only
+bytes the server sent are echoed; no credential passes through that path.

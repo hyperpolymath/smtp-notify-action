@@ -68,7 +68,7 @@ exploitability by a stranger.
 username and password on the wire base64-encoded, which is not encryption.
 A typo silently downgraded the transport.
 |High
-|Open — fix written, lands in PR A
+|Fixed on `main`; ships in v0.2.0
 |https://github.com/hyperpolymath/smtp-notify-action/issues/1[#1]
 
 |D-002
@@ -78,7 +78,7 @@ downloaded, its SHA-256 verifies (the file is intact — it is simply the wrong
 file), and the step dies at `exec` with an exec-format error that names nothing
 useful.
 |Medium
-|Open — fix written, lands in PR A
+|Fixed on `main`; ships in v0.2.0
 |https://github.com/hyperpolymath/smtp-notify-action/issues/2[#2]
 
 |D-003
@@ -86,7 +86,7 @@ useful.
 (bad credentials), a `550` (rejected recipient) and a `554` (rejected message)
 were one indistinguishable failure in the log.
 |Medium
-|Open — fix written, lands in PR A
+|Fixed on `main`; ships in v0.2.0
 |https://github.com/hyperpolymath/smtp-notify-action/issues/3[#3]
 
 |D-004
@@ -94,7 +94,7 @@ were one indistinguishable failure in the log.
 silent held the runner until the job-level timeout, up to six hours by default,
 consuming minutes for a mail that was never sent.
 |Medium
-|Open — fix written, lands in PR A
+|Fixed on `main`; ships in v0.2.0
 |https://github.com/hyperpolymath/smtp-notify-action/issues/4[#4]
 
 |D-005

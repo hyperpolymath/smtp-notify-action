@@ -156,6 +156,48 @@ Eliminating the call therefore removed a mechanism that was both broken and
 redundant. Verified 2026-09-03 against a listener that accepts and then sends
 nothing: the run ends at the deadline with a diagnostic and exit 1.
 
+=== The reintroduction guard, and exactly what it does not cover
+
+Elimination removes the call, but "we do not pass a timeout" does not survive a
+future edit on its own: the field is still declared, still defaulted, still one
+line away. The disposition is therefore backed by an administrative control
+(level 4) that turns half of the reintroduction path into a compile error.
+
+`IpAddress.ConnectOptions` is constructed in exactly one place in this program,
+`connectNoTimeout` in `src/main.zig`. Its callers pass a local
+`SafeConnectOptions`, which carries `mode` and `protocol` and has *no `timeout`
+field at all*:
+
+[source,zig]
+----
+comptime {
+    if (@hasField(SafeConnectOptions, "timeout"))
+        @compileError("SafeConnectOptions must not carry a timeout: see BUSTFILE.adoc BUST-2026-001");
+}
+----
+
+Note what is and is not covered. Adding the field back to the wrapper is a
+compile error. Bypassing the wrapper is not: three stdlib entry points take
+`IpAddress.ConnectOptions` directly and are reachable from anywhere:
+`IpAddress.connect` (`net.zig:339`), `HostName.connect` (`HostName.zig:274`)
+and `HostName.connectMany` (`:331`). Nothing in the language stops a new call
+site from calling one of those and constructing the options struct itself.
+That half is caught in review, and the comment at the guard says so rather than
+implying the check is total.
+
+This distinction is not pedantry. A guard that overstates its own coverage is
+the same defect class as the error set in the section above: a machine-checked
+artefact making a claim wider than anything that backs it. If this guard is
+ever cited as "we cannot pass a timeout", that citation is wrong.
+
+The shape generalises past this one field, and is the reason the entry is
+written out rather than left as a commit message. The cure is to give the
+hazardous option *a type in which the caller cannot express the hazard*, rather
+than to check the value at run time. The defect is removed at the bearer, by
+construction, instead of being detected in the argument — which is why it
+produces a compile error rather than a test failure, and why it costs nothing
+at run time.
+
 === Re-check trigger
 
 When ziglang/zig#25747 closes *and* this repository moves to a Zig release
