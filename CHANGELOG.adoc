@@ -14,22 +14,22 @@ toc::[]
 
 == Unreleased
 
+Nothing yet.
+
+== v0.2.0 — 2026-09-03
+
 [IMPORTANT]
 ====
-`main` is not a release, and pinning `@main` is not supported.
+Upgrading from v0.1.0 changes behaviour. `secure` is now fail-closed: a value this
+action does not recognise is rejected instead of being treated as plaintext. A
+workflow that passed `secure: false` expecting dawidd6's "STARTTLS when the server
+offers it" now fails with a message naming the cause, rather than downgrading to
+cleartext. Sending in the clear requires typing `plaintext`. See `MIGRATION.adoc`.
 
-Everything in this section is present in the *source*, but `action.yml` on `main`
-still downloads the *v0.1.0* binary and still carries the v0.1.0 SHA-256 pins. The
-release workflow verifies rebuilt binaries against those pins and cannot mint new
-ones, so correct hashes for the next version can only exist in that version's own
-release commit.
-
-The practical consequence: on `main`, `secure: false` is *described* as failing
-closed but would still take the v0.1.0 plaintext path, because the described
-behaviour is not in the binary being fetched. Consumers pinned to `v0.1.0` or to a
-commit SHA are unaffected. This window closes when v0.2.0 is tagged.
+This release also closes the v0.1.0 window described in the previous edition of
+this file: `action.yml` here downloads the v0.2.0 binaries and carries their
+SHA-256 pins, so the behaviour described below is the behaviour that runs.
 ====
-
 === Changed
 
 * *`secure` is now fail-closed.* Transport selection accepts `true`/`implicit`

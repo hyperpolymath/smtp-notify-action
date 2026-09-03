@@ -104,18 +104,18 @@ runs:
         case "$(uname -m)" in
           x86_64)
             asset="smtp-notify-x86_64-linux-musl"
-            sha256="f8a849f4f91574e9a459f1cf003873032e88ce60b22a57ea11fb7ddd69bb0d82"
+            sha256="cd0692ae7d4c77dd63f4accea9ad57310d1e12c6cdc75a8bcf4e83efe878b195"
             ;;
           aarch64)
             asset="smtp-notify-aarch64-linux-musl"
-            sha256="d527b4fd8ab84e5e722aacf27911cb824642e56308139df92e3972a5f989766a"
+            sha256="6d87e89baed740bf5682aaed7005281fe13c26aef727568542eb2cd967dafbef"
             ;;
           *)
             echo "smtp-notify: unsupported runner architecture: $(uname -m)" >&2
             exit 1
             ;;
         esac
-        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.1.0/${asset}"
+        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.2.0/${asset}"
         curl -fsSL --retry 3 --retry-delay 2 -o "${RUNNER_TEMP}/smtp-notify" "$url"
         echo "${sha256}  ${RUNNER_TEMP}/smtp-notify" | sha256sum -c -
         chmod +x "${RUNNER_TEMP}/smtp-notify"
