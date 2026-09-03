@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: MPL-2.0
+= Known defects and security posture
+:toc: macro
+:toclevels: 2
+
+What is wrong with this action, stated by us rather than discovered by you.
+
+Two registers sit beside this one and the split matters:
+
+* This file — defects in *our own* code, plus the security posture that
+  surrounds them.
+* link:BUSTFILE.adoc[`BUSTFILE.adoc`] — defects in *dependencies* we do not
+  control (the Zig toolchain and standard library, upstream actions), each with
+  its hazard-control disposition and the event that would let us delete the
+  workaround.
+* The GitHub issue tracker — everything else, including work that is merely
+  wanted rather than broken.
+
+toc::[]
+
+== No CVE has been assigned, and here is why
+
+This section exists because "known defects" and "vulnerabilities" get conflated,
+and conflating them makes both lists useless.
+
+*There is no CVE for anything in this repository, and none has been requested.*
+A CVE identifies a vulnerability in released software that an attacker can
+exploit. The defects below are of three other kinds:
+
+[cols="1,3"]
+|===
+|Kind |Handling
+
+|*Weakness in our code with a security consequence* — the fail-open `secure`
+input (D-001) is the example. |Fixed in code, described here, and given a
+GitHub Security Advisory if it were ever present in a *published tag that users
+had adopted*. It was not: it is fixed before first adoption.
+
+|*Self-inflicted denial of service from an unimplemented upstream path* —
+BUST-2026-001. |Not a vulnerability. Nobody but the operator can trigger it, it
+requires our own source to opt in, and it is a `TODO` in a dependency rather
+than a flaw in a shipped artefact. Recorded in the Bustfile.
+
+|*Missing capability* — no STARTTLS, no `AUTH LOGIN`. |An issue, not a defect.
+Listed here only where its absence changes what a user should do.
+|===
+
+There is no VEX document in this repository. A VEX statement asserts whether a
+*named* vulnerability affects a product, so it needs vulnerability identifiers
+to make statements about, and there are none: the binary is built from this
+source with `.dependencies = .{}`, so the only third-party code in the artefact
+is the Zig standard library itself. If a CVE is ever assigned against Zig's
+`std.crypto` or `std.Io` and this action links it, a VEX document is the right
+answer and this is the place it will be recorded.
+
+== Defect register
+
+Severity is about the consequence to a user of this action, not about
+exploitability by a stranger.
+
+[cols="1,3,1,1,1"]
+|===
+|ID |Defect |Severity |Status |Tracking
+
+|D-001
+|`secure` failed *open*: any value other than the exact string `true` — `1`,
+`yes`, `TRUE`, `on` — selected a plaintext session, and AUTH PLAIN then put the
+username and password on the wire base64-encoded, which is not encryption.
+A typo silently downgraded the transport.
+|High
+|*Fixed*, unreleased
+|https://github.com/hyperpolymath/smtp-notify-action/issues/1[#1]
+
+|D-002
+|The installer detects CPU architecture but not operating system. Windows and
+Intel macOS both report `x86_64` from `uname -m`, so the Linux binary is
+downloaded, its SHA-256 verifies (the file is intact — it is simply the wrong
+file), and the step dies at `exec` with an exec-format error that names nothing
+useful.
+|Medium
+|*Fixed*, unreleased
+|https://github.com/hyperpolymath/smtp-notify-action/issues/2[#2]
+
+|D-003
+|Server reply text was discarded; only the three-digit code was read. A `535`
+(bad credentials), a `550` (rejected recipient) and a `554` (rejected message)
+were one indistinguishable failure in the log.
+|Medium
+|*Fixed*, unreleased
+|https://github.com/hyperpolymath/smtp-notify-action/issues/3[#3]
+
+|D-004
+|No timeout anywhere. A server that accepted the connection and then went
+silent held the runner until the job-level timeout, up to six hours by default,
+consuming minutes for a mail that was never sent.
+|Medium
+|*Fixed*, unreleased
+|https://github.com/hyperpolymath/smtp-notify-action/issues/4[#4]
+
+|D-005
+|No STARTTLS. Port 587 submission cannot be used at all, which is the ordinary
+path for most providers. The action fails closed rather than falling back to
+plaintext, so this costs reachability, not confidentiality.
+|Medium
+|Open
+|https://github.com/hyperpolymath/smtp-notify-action/issues/5[#5]
+
+|D-006
+|No EHLO capability parsing. The action assumes `AUTH PLAIN` is available
+instead of reading what the server offers, so a server that offers only other
+mechanisms fails at AUTH with no explanation of why.
+|Medium
+|Open
+|https://github.com/hyperpolymath/smtp-notify-action/issues/9[#9]
+
+|D-007
+|`AUTH PLAIN` only. Microsoft 365 offers exactly `AUTH LOGIN XOAUTH2` on
+port 587 and has no listener on 465, so it is unreachable by two independent
+routes. Probed 2026-09-02.
+|Medium
+|Open
+|https://github.com/hyperpolymath/smtp-notify-action/issues/10[#10]
+
+|D-008
+|`src/tls/Client.zig` is 91 KB — roughly three quarters of the code — and has
+no tests of its own. It is exercised only end-to-end. This is the largest
+untested surface in the repository and it is the security-critical one.
+|Medium
+|Open
+|Tracked in the issue tracker
+
+|D-009
+|No retry or backoff. A transient `4xx` fails the step immediately rather than
+being retried. Loud, which is the house preference, but a transient network
+fault fails a build.
+|Low
+|Open
+|Tracked in the issue tracker
+|===
+
+== What is deliberately absent and will stay absent
+
+`ignore_cert`, or any other input that disables certificate verification.
+`dawidd6/action-send-mail` has one; parity here would be a regression. TLS
+verification is always on and no input can turn it off.
+
+== Scope of the proof, stated exactly
+
+The action advertises a machine-checked specification, so the boundary of that
+claim belongs in the defect register rather than only in the README.
+
+* *Universally quantified*: dot-stuffing (`stuffSafe` in `spec/src/Serialize.idr`)
+  — a theorem over all inputs.
+* *Proved over the concrete table*: the protocol state machine's determinism,
+  termination and ordering. These are `Refl` proofs about the eight rows that
+  exist, so they are a very strong table lint rather than a statement about all
+  possible state machines. They would need restating if the table changed shape.
+* *Corpus only, no theorem*: header-value validation is covered by golden
+  vectors. An injection vector outside the corpus is not excluded by proof.
+* *Not covered at all*: TLS (D-008), the network layer, and the installer.
+
+The Idris2 layer is a specification and code generator. It does not ship in the
+binary, and `scripts/check-fsm-drift.sh` is what stops the generated Zig
+drifting away from it.
+
+== Reporting something not listed here
+
+Open a normal issue for a defect. For anything that would let a third party
+read credentials or mail contents, use GitHub's private vulnerability reporting
+on this repository rather than a public issue, and expect an advisory rather
+than a bare commit.

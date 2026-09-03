@@ -1,0 +1,212 @@
+// SPDX-License-Identifier: MPL-2.0
+= Bustfile — defects in things we depend on but do not control
+:toc: macro
+:toclevels: 2
+
+Every entry here is a defect in a *dependency* — the toolchain, the standard
+library, an upstream action — that this repository had to design around. It is
+deliberately separate from our own issue tracker: these are not things we can
+fix, only things we can route around, and the routing has to be justified and
+re-checked rather than quietly absorbed.
+
+Each entry carries a disposition on the hazard-control hierarchy, highest
+control first, and a *re-check trigger* saying exactly what event would let us
+delete the workaround. A workaround with no re-check trigger becomes permanent
+by accident, which is how a codebase silently accumulates scar tissue.
+
+.Hazard-control hierarchy, as applied here
+[cols="1,3"]
+|===
+|Level |Meaning in this codebase
+
+|1. Eliminate |Do not perform the hazardous operation at all. The defect
+becomes unreachable rather than handled.
+|2. Substitute |Achieve the same outcome through a different API or component
+that does not have the defect.
+|3. Engineering control |Keep the operation, add a mechanism that contains the
+failure (a guard, a supervisor, a bound).
+|4. Administrative control |The code still does the dangerous thing; a rule,
+comment or lint stops a human reintroducing it.
+|5. Accept |Residual risk is tolerable and documented. Requires a stated reason.
+|===
+
+A disposition at level 3 or below MUST record its residual risk. Level 1 and 2
+entries record what would make the defect reachable again.
+
+toc::[]
+
+== BUST-2026-001 — Zig 0.16.0 aborts on any socket connect timeout
+
+[cols="1,3"]
+|===
+|Field |Value
+
+|Component |Zig standard library, `std.Io`, version 0.16.0
+|Discovered |2026-09-03, by running the built binary against a local listener
+|Upstream |https://github.com/ziglang/zig/issues/25747[ziglang/zig#25747] (open,
+labelled `enhancement`, filed 2025-10-29 by the Zig lead)
+|Our disposition |*Level 1 — Eliminate*
+|Status |Worked around; no residual exposure
+|===
+
+=== Symptom
+
+Setting `IpAddress.ConnectOptions.timeout` to anything other than `.none`
+aborts the process with `panic: TODO implement netConnectIpPosix with timeout`
+and exit code 134. Not an error return — a panic, so it cannot be caught.
+
+=== Extent
+
+Five providers supply `netConnectIp` through the `Io` vtable in 0.16.0. *None
+of them honours the field* — so it is unimplemented on every platform, not
+merely on the one we build for:
+
+[cols="2,2,3"]
+|===
+|Provider |`netConnectIp` |On a non-`.none` timeout
+
+|`Threaded.zig:1932` |`netConnectIpPosix` / `netConnectIpWindows`
+|`@panic` at `12077` / `12096`
+|`Kqueue.zig:651` |`netConnectIp` |`@panic("TODO")` at `1037`
+|`Uring.zig:777` |`netConnectIpUnavailable` |connect unimplemented; returns `error.NetworkDown`
+|`Dispatch.zig:457` |`netConnectIpUnavailable` |connect unimplemented; returns `error.NetworkDown`
+|`Io.zig:2624` |`failingNetConnectIp` |the deliberately-failing test `Io`
+|===
+
+Note the shape of the last two rows: `Uring` and `Dispatch` handle *their*
+unimplemented connect by returning an error. Two files over, the same
+unimplemented state aborts instead. The difference is not a considered policy,
+it is which `TODO` got written which way.
+
+=== The signature promises the error that is never returned
+
+`net.IpAddress.ConnectError` (`lib/std/Io/net.zig:330`) is declared as
+`… || Io.Timeout.Error || …`, and `Io.Timeout.Error` is `error{Timeout}`.
+
+So `connect` states in its type that it can return `error.Timeout`. Nothing
+ever does; the two backends that implement connect at all abort the process
+instead. A caller who reasons from the error set — the natural place to look
+when asking "can this time out?" — is told yes by the only machine-checked
+thing in reach.
+
+This is the same defect shape as BUST-2026-002, and the pair of them is the
+lesson worth carrying: in this standard library, *an error set is a claim about
+what may be returned, never evidence that anything returns it*.
+
+=== Upstream report — prepared, blocked
+
+Upstream #25747 names only the two `Threaded` guards. The `Kqueue` site, the
+five-provider survey, and the `ConnectError` observation above are not recorded
+there.
+
+A comment carrying them is written and ready at
+link:docs/upstream/ziglang-zig-25747.md[`docs/upstream/ziglang-zig-25747.md`],
+*but it could not be posted*: as of 2026-09-03 `ziglang/zig` restricts
+interactions to collaborators, which blocks both commenting and opening an
+issue from a non-collaborator account. The limit's expiry is not readable from
+outside (the endpoint is admin-only). Retry instructions are in that file. This
+is a moderation control and is not to be worked around.
+
+=== Why it was not caught earlier
+
+This is the defect's most instructive property, and the reason it earns an
+entry rather than a commit message.
+
+`timeout` is an ordinary struct field with a default of `.none`. Setting it
+compiles cleanly, passes `zig build`, and passes every unit test, because the
+unit tests drive scripted in-memory streams and never open a socket. The abort
+happens only when the process connects to a real host — that is, only in
+production, on the customer's runner, on the first real send.
+
+There was no compile-time signal and no test-time signal. The only instrument
+that could have found it was running the actual binary against an actual
+socket, which is what found it.
+
+=== Why the obvious contingency does not work
+
+The natural mitigation — "pass a value so small or so large that the timeout
+can never fire in practice" — cannot work, and the reason generalises.
+
+The guard is `options.timeout != .none`. That is an *inhabitance* test, not a
+magnitude test: it asks whether the caller supplied a value at all, not what
+the value is. A duration of one attosecond and a duration of one year take the
+same branch. There is no inhabitant of the type that is simultaneously
+non-`.none` and non-fatal, so no choice of value is a workaround.
+
+Any contingency that tries to satisfy a predicate by tuning a quantity fails
+whenever the predicate is about presence rather than quantity. Check which kind
+the guard is before reaching for a magnitude.
+
+=== Disposition — Level 1, Eliminate
+
+We do not pass a connect timeout. The operation that triggers the defect is
+never performed, so the defect is unreachable rather than handled.
+
+This is not a downgrade of the original requirement. The connect deadline was
+only ever going to bound the connect phase, while `Stream.Reader` and
+`Stream.Writer` carry no deadline at all (see BUST-2026-002) — so the far more
+likely hang, a server that accepts the connection and then falls silent, would
+have survived it untouched.
+
+The replacement is a watchdog thread started before `connect`, which bounds the
+*whole run*: connection, TLS handshake, and every read and write after it.
+One mechanism, strictly larger coverage, and no dependence on the broken path.
+
+Eliminating the call therefore removed a mechanism that was both broken and
+redundant. Verified 2026-09-03 against a listener that accepts and then sends
+nothing: the run ends at the deadline with a diagnostic and exit 1.
+
+=== Re-check trigger
+
+When ziglang/zig#25747 closes *and* this repository moves to a Zig release
+containing the fix, reconsider — but only on merit. The watchdog is likely to
+remain the better mechanism regardless, because it is the only one of the two
+that bounds reads and writes. Do not restore the connect timeout simply because
+it became available.
+
+== BUST-2026-002 — `Stream.Reader` advertises a timeout it never requests
+
+[cols="1,3"]
+|===
+|Component |Zig standard library, `std.Io`, version 0.16.0
+|Discovered |2026-09-02, reading the stdlib source while designing timeouts
+|Upstream |Not filed; this is an API-shape observation, not a crash
+|Our disposition |*Level 1 — Eliminate* (same watchdog as BUST-2026-001)
+|Status |Worked around; residual risk stated below
+|===
+
+=== Symptom
+
+`std.Io.Stream.Reader.Error` includes a `Timeout` variant, which reads as a
+promise that reads can be given deadlines. They cannot: the reader struct has
+no deadline field, and nothing in the public API supplies one. Nothing in the
+0.16.0 tree ever returns that error for a socket read.
+
+=== Why it matters
+
+An error set is the most natural place to look when asking "can this operation
+time out?", and here it answers yes when the truth is no. Building on that
+answer produces a timeout that compiles, reads correctly in review, and never
+fires — the failure mode this codebase treats as worse than having no timeout
+at all, because it is indistinguishable from a working one until the hang.
+
+Trusting the error set alone would have shipped exactly that. The error set is
+a claim about what *can be returned*, never evidence that anything requests it.
+
+=== Disposition — Level 1, Eliminate
+
+No per-operation read or write deadlines are attempted. The whole-run watchdog
+supplies the bound instead.
+
+*Residual risk*: the watchdog is a whole-run deadline, not an idle timer. A
+server that dribbles one byte just often enough to stay under the limit will
+run to the deadline rather than being cut off at the first stall. For a
+single notification mail with a 60-second default this is an acceptable
+difference; for a long-lived or streaming session it would not be, and this
+entry should be revisited before this code is reused in one.
+
+=== Re-check trigger
+
+A Zig release in which `Stream.Reader` gains a real deadline field that the
+socket read path honours. Verify by running a probe against a silent listener
+before believing it — the error set will look the same either way.
