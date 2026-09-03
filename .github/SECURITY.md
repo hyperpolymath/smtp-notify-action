@@ -26,7 +26,7 @@ defects instead of waiting to be asked about them.
 |---|---|
 | `v0.2.0` | Yes — current release |
 | `v0.1.0` | No — superseded; `secure` fails open |
-| `main` | Yes, but unreleased and unpinned; not for production use |
+| `main` | No — not a release; during a release window it names assets that are not published yet |
 
 Pin a tag or a commit SHA; never `@main`.
 

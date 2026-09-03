@@ -14,7 +14,19 @@ toc::[]
 
 == Unreleased
 
-Nothing yet.
+[IMPORTANT]
+====
+`main` is not a release, and pinning `@main` is not supported.
+
+Between a release commit landing on `main` and its tag being pushed, `action.yml`
+on `main` names assets that do not exist yet, so `@main` fails at the download
+step. This window is unavoidable rather than an oversight: the release workflow
+refuses to publish unless the asset URL *in the tagged commit* already names the
+tag being released, so the commit must precede the tag. The window is minutes
+long and is one more reason `@main` is not a supported ref.
+
+Pin a tag, or a commit SHA that is an ancestor of one.
+====
 
 == v0.2.0 — 2026-09-03
 
