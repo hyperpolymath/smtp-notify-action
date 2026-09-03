@@ -24,10 +24,11 @@ defects instead of waiting to be asked about them.
 
 | Version | Supported |
 |---|---|
-| `v0.1.0` | Yes — the only release |
+| `v0.2.0` | Yes — current release |
+| `v0.1.0` | No — superseded; `secure` fails open |
 | `main` | Yes, but unreleased and unpinned; not for production use |
 
-There is one release. Pin a tag or a commit SHA; never `@main`.
+Pin a tag or a commit SHA; never `@main`.
 
 ## The vendored TLS client — read this before adopting
 
