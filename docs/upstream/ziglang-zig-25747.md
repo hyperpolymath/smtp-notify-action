@@ -59,7 +59,7 @@ So `IpAddress.ConnectOptions.timeout` is, in practice, uninhabitable on every pl
 
 **How it presents**
 
-`timeout` defaults to `.none`, so setting it is an ordinary struct-literal field. It compiles, and it passes tests: a test suite that drives scripted in-memory streams never reaches `netConnectIp`, so there is no compile-time and no test-time signal. The abort happens the first time the program connects to a real host, which for a lot of programs means the first run in production. In our case a green build and a green test suite shipped a binary that aborted with exit 134 on its first real socket.
+`timeout` defaults to `.none`, so setting it is an ordinary struct-literal field. It compiles, and it passes tests: a test suite that drives scripted in-memory streams never reaches `netConnectIp`, so there is no compile-time and no test-time signal. The abort happens the first time the program connects to a real host, which for a lot of programs means the first run in production. In our case a green build and a green test suite produced a binary that aborted with exit 134 on its first real socket; it was caught by a local probe against a listener, before release.
 
 The workaround is easy once you know (don't set the field; bound the operation from outside), but there is nothing to know it *from* short of reading the backend source.
 
@@ -69,4 +69,3 @@ There is precedent for this a few files over: `Uring.zig` and `Dispatch.zig` han
 
 The `enhancement` label reads as "a feature not yet added", which is accurate for the work itself, but the current state is also a reachable abort from ordinary safe code with no diagnostic before it fires. That may be worth weighing separately from the implementation work.
 
-Happy to test a fix against a real SMTP server on Linux x86_64 and aarch64 if that is useful.
