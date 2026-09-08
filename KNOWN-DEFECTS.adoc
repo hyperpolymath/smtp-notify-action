@@ -41,7 +41,7 @@ BUST-2026-001. |Not a vulnerability. Nobody but the operator can trigger it, it
 requires our own source to opt in, and it is a `TODO` in a dependency rather
 than a flaw in a shipped artefact. Recorded in the Bustfile.
 
-|*Missing capability* — no STARTTLS, no `AUTH LOGIN`. |An issue, not a defect.
+|*Missing capability* — no `AUTH LOGIN`. |An issue, not a defect.
 Listed here only where its absence changes what a user should do.
 |===
 
@@ -98,11 +98,20 @@ consuming minutes for a mail that was never sent.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/4[#4]
 
 |D-005
-|No STARTTLS. Port 587 submission cannot be used at all, which is the ordinary
-path for most providers. The action fails closed rather than falling back to
-plaintext, so this costs reachability, not confidentiality.
+|No STARTTLS. Port 587 submission could not be used at all, which is the
+ordinary path for most providers. The action failed closed rather than falling
+back to plaintext, so this cost reachability, not confidentiality.
 |Medium
-|Open
+|Fixed on `main`; unreleased. `secure: false`/`starttls` starts in the clear
+on the submission port and upgrades in place (RFC 3207), including the
+mandatory second EHLO. The upgrade is not optional: a server that does not
+advertise `STARTTLS` fails the step, and the guard runs *before* the command
+goes out, so nothing carrying a credential is ever written to a cleartext
+stream. The generated state machine carries two proven tables — the implicit
+one is proven to contain no upgrade rows, the STARTTLS one is proven to reach
+them from the start state (`upgradeIsOnThePath`), which is what a per-row
+proof alone does not establish. *Choosing* an AUTH mechanism is D-007 and is
+still open, so Microsoft 365 is reachable but not yet loggable-into.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/5[#5]
 
 |D-006
@@ -121,8 +130,9 @@ reporting, both of which are done.
 
 |D-007
 |`AUTH PLAIN` only. Microsoft 365 offers exactly `AUTH LOGIN XOAUTH2` on
-port 587 and has no listener on 465, so it is unreachable by two independent
-routes. Probed 2026-09-02.
+port 587 and has no listener on 465. Probed 2026-09-02. With D-005 and D-006
+fixed the action now connects, upgrades and reports the advertised list, so
+this is the last piece between it and Microsoft 365.
 |Medium
 |Open
 |https://github.com/hyperpolymath/smtp-notify-action/issues/10[#10]

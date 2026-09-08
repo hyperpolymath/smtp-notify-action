@@ -31,8 +31,9 @@ one of behaviour rather than of naming.
 |`false`
 |Plain connection that is *upgraded via STARTTLS* when the server offers it.
 This is the normal path for port 587 submission.
-|STARTTLS is *selected but not yet implemented*, so the step *fails* with a
-message naming the reason. It never falls back to plaintext.
+|Same *when the server offers it* (RFC 3207). The difference is what happens
+when it does not: dawidd6 carries on in the clear, this action fails the step.
+It never falls back to plaintext.
 |===
 
 The input is fail-closed. It accepts exactly five values — `true` and
@@ -42,8 +43,9 @@ as `1`, `yes`, `TRUE` or `on` fails the step rather than quietly selecting a
 transport.
 
 This is a deliberate divergence from dawidd6, where `false` means "STARTTLS
-when the server offers it". Here it fails instead of downgrading. The reason
-for the strictness is historical: v0.1.0 treated *any* unrecognised value as
+when the server offers it, and plaintext when it does not". Here the second
+half is an error, not a downgrade. The reason for the strictness is
+historical: v0.1.0 treated *any* unrecognised value as
 plaintext, so a typo could put the username and password on the wire
 base64-encoded in a session with no encryption. That was
 https://github.com/hyperpolymath/smtp-notify-action/issues/1[issue #1] and it
@@ -53,16 +55,18 @@ for a containerized test sink.
 The migration rule follows from that:
 
 * If your dawidd6 step used `secure: true` on port 465, it ports across unchanged.
-* If it used `secure: false` on port 587, it will *fail loudly* here rather than
-  send anything, because STARTTLS is not implemented (tracked in
-  https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]). Wait
-  for that issue; do not reach for `plaintext` as a substitute.
+* If it used `secure: false` on port 587, it ports across too — STARTTLS has
+  landed on `main` (unreleased).
+  The one behavioural difference is a server that does not advertise
+  `STARTTLS` — dawidd6 would send in the clear, this action stops. Do not
+  reach for `plaintext` if that happens; check the port first.
 
-== Read this second: Microsoft 365 cannot be reached at all
+== Read this second: Microsoft 365 cannot be authenticated to yet
 
 If your dawidd6 step sends through `smtp.office365.com`, *do not migrate yet*.
 This is a separate blocker from the `secure` change above, and switching to
-port 465 does not work around it.
+port 465 does not work around it. The action can now reach the server; it
+cannot log in.
 
 Both of these were probed on 2026-09-02:
 
@@ -71,18 +75,14 @@ Both of these were probed on 2026-09-02:
 * `smtp.office365.com:465` has no listener at all, so the implicit-TLS path
   this action does support cannot connect.
 
-So the two gaps compound: adding STARTTLS alone would still leave the action
-unable to authenticate, and moving to the implicit-TLS port it already supports
-finds nothing listening. Reaching Microsoft 365 needs three things together:
-STARTTLS on 587, EHLO capability parsing, and `AUTH LOGIN`. All three are now
-tracked separately:
-https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]
-(STARTTLS),
-https://github.com/hyperpolymath/smtp-notify-action/issues/9[issue #9]
-(EHLO capability parsing) and
+Two of the three pieces are now on `main` (unreleased): STARTTLS on 587, and
+EHLO capability parsing
+(https://github.com/hyperpolymath/smtp-notify-action/issues/9[issue #9]). The
+action can now *connect* to `smtp.office365.com:587` and will tell you exactly
+which mechanisms were advertised. It still cannot *authenticate*: it sends
+`AUTH PLAIN`, which Microsoft 365 does not offer. That last piece is
 https://github.com/hyperpolymath/smtp-notify-action/issues/10[issue #10]
-(`AUTH LOGIN`). Migrating an Office 365 sender needs all three closed, not
-just the first.
+(`AUTH LOGIN`). Migrating an Office 365 sender needs it closed.
 
 Google Workspace is unaffected, and so is any server that offers `AUTH PLAIN`
 on port 465. `smtp.gmail.com` was probed on the same day and offers `AUTH PLAIN`
@@ -227,7 +227,7 @@ nine-input subset and already on implicit TLS.
 
 == What you give up
 
-Microsoft 365 as a provider · STARTTLS and port 587 · HTML bodies · attachments ·
+Microsoft 365 as a provider · HTML bodies · attachments ·
 cc/bcc/reply-to · custom headers · non-Linux runners · the ability to skip
 certificate verification · a large user base to search for answers in.
 

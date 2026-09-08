@@ -28,6 +28,30 @@ long and is one more reason `@main` is not a supported ref.
 Pin a tag, or a commit SHA that is an ancestor of one.
 ====
 
+=== Added
+
+* *STARTTLS on the submission port.* `secure: false` or
+  `secure: starttls` now starts in the clear on port 587 and upgrades the
+  same connection in place per RFC 3207, including the mandatory second
+  `EHLO` after the upgrade. The upgrade is not opportunistic: a server that
+  does not advertise `STARTTLS` fails the step, and that check runs before
+  the command is sent, so no credential is ever written to a cleartext
+  stream. Certificate verification is identical on both TLS paths.
+* *EHLO capability parsing* (issue #9). The `EHLO` reply is parsed into a
+  `Capabilities` value — `STARTTLS`, the `AUTH` mechanism list (including
+  the Exchange `AUTH=LOGIN` spelling), `SIZE` and `8BITMIME` — and an `AUTH`
+  failure now names what the server actually advertised. A mechanism
+  mismatch and a wrong password no longer look alike in the log.
+* The proven state machine now carries *two* tables, selected by transport,
+  each proven separately: the implicit-TLS table is proven to contain no
+  upgrade rows, and the STARTTLS table is proven to *reach* them from the
+  start state. A row that is present but unreachable would have
+  authenticated in the clear while every prior proof stayed green.
+
+Microsoft 365 is now reachable but still cannot be authenticated to: it
+offers only `AUTH LOGIN` and `XOAUTH2`, and this action still sends
+`AUTH PLAIN` (issue #10).
+
 == v0.2.0 — 2026-09-03
 
 [IMPORTANT]

@@ -60,8 +60,13 @@ Vendoring also means an upstream fix does **not** reach you automatically.
   regression, and this is a deliberate incompatibility.
 - **Transport selection is fail-closed.** An unrecognised `secure` value is
   rejected outright rather than falling back to plaintext. `secure: false`
-  (STARTTLS) is accepted but not yet implemented, so it *fails* rather than
-  silently sending in the clear. Plaintext requires typing `plaintext`.
+  (STARTTLS) upgrades in place per RFC 3207 and *fails* if the server does not
+  advertise `STARTTLS`, rather than silently sending in the clear. Plaintext
+  requires typing `plaintext`.
+- **The post-upgrade EHLO is the one that counts.** RFC 3207 §4.2 requires a
+  second `EHLO` after a STARTTLS upgrade, and the capability list it returns
+  *replaces* the cleartext one. The cleartext list is unauthenticated — an
+  active attacker can edit it — so it is never used to decide anything.
 - **The password never reaches `argv`.** It is passed through the environment, so
   it cannot leak into a process listing on a shared runner.
 - **The binary is pinned by SHA-256** in `action.yml`, and `release.yml` refuses
@@ -77,9 +82,12 @@ depend on the action.
 
 - **Linux only.** The released binaries are static `linux-musl` builds. The action
   gates on `uname -s` and fails with a clear message on Windows and macOS runners.
-- **AUTH PLAIN only.** `AUTH LOGIN` is not implemented (issue #10) and EHLO
-  capabilities are not parsed (issue #9), so mechanism selection is blind. This is
-  why Microsoft 365 cannot currently be authenticated to.
+- **AUTH PLAIN only.** `AUTH LOGIN` is not implemented (issue #10), so mechanism
+  selection is still blind: the client sends `AUTH PLAIN` regardless of what was
+  advertised. EHLO capabilities *are* now parsed (issue #9, landed on `main`,
+  unreleased), so a mismatch is at least reported as a mismatch rather than as
+  a bad password. This is why Microsoft 365 cannot currently be authenticated
+  to.
 - **No per-operation network deadlines.** A whole-run watchdog bounds the entire
   run instead. It is a deadline, not an idle timer: a server that dribbles bytes
   slowly will run to the deadline rather than being cut off at the first stall.

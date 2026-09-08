@@ -193,12 +193,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const port = std.fmt.parseInt(u16, port_str, 10) catch
         fatal("SMTP_PORT is not a port number: {s}", .{port_str});
     const transport = parseTransport(envs);
-    if (transport == .starttls) fatal(
-        "SMTP_SECURE selects STARTTLS, which is not implemented yet " ++
-            "(https://github.com/hyperpolymath/smtp-notify-action/issues/5). " ++
-            "Failing rather than falling back to an unencrypted session.",
-        .{},
-    );
     const handshake_only = envFlag(envs, "SMTP_HANDSHAKE_ONLY", false);
     const timeout_seconds = envSeconds(envs, "SMTP_TIMEOUT_SECONDS", default_timeout_seconds);
 
@@ -212,7 +206,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const now: std.Io.Timestamp = .now(io, .real);
 
-    const cfg: smtp.Config = if (handshake_only) .{
+    var cfg: smtp.Config = if (handshake_only) .{
         .ehlo_domain = "github-actions",
         .username = "",
         .password = "",
@@ -263,6 +257,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
+    // TLS resources for BOTH encrypted transports. A STARTTLS session needs
+    // them ready before the upgrade — the driver calls back mid-session and
+    // there is nowhere to report an allocation failure from inside it.
     const tls_read_buf = gpa.alloc(u8, tls_buf_len + 4096) catch |err| fatal("{t}", .{err});
     const tls_write_buf = gpa.alloc(u8, 4096) catch |err| fatal("{t}", .{err});
 
@@ -274,25 +271,64 @@ pub fn main(init: std.process.Init.Minimal) !void {
         fatal("cannot load the system CA bundle: {t}", .{err});
     var bundle_lock: std.Io.RwLock = .init;
 
-    var tls_client = TlsClient.init(
+    const tls_options: TlsClient.Options = .{
+        .host = .{ .explicit = addr },
+        .ca = .{ .bundle = .{
+            .gpa = gpa,
+            .io = io,
+            .lock = &bundle_lock,
+            .bundle = &bundle,
+        } },
+        .read_buffer = tls_read_buf,
+        .write_buffer = tls_write_buf,
+        .entropy = &entropy,
+        .realtime_now = now,
+        // SMTP replies carry no length framing, so keep truncation-attack
+        // detection on (the default) — unlike HTTP, we cannot detect a
+        // cut-off stream at the application layer.
+    };
+
+    // Certificate verification is identical on both paths: the same CA
+    // bundle, the same explicit host name, the same defaults. STARTTLS
+    // differs only in WHEN the handshake happens, never in how strictly it
+    // is checked — a "starttls is the lenient one" asymmetry is how
+    // opportunistic TLS becomes no TLS.
+    var tls_client: TlsClient = undefined;
+
+    if (transport == .starttls) {
+        var upgrade: TlsUpgrade = .{
+            .client = &tls_client,
+            .options = tls_options,
+            .input = &stream_reader.interface,
+            .output = &stream_writer.interface,
+            .addr = addr,
+            .port = port,
+        };
+        cfg.use_starttls = true;
+        cfg.upgrader = .{ .ctx = &upgrade, .upgradeFn = TlsUpgrade.run };
+
+        // Starts on the bare socket; the driver replaces its own wire when
+        // the server accepts STARTTLS, and refuses to go on if it does not.
+        smtp.runSessionDiag(cfg, .{
+            .r = &stream_reader.interface,
+            .w = &stream_writer.interface,
+        }, &diag) catch |err| fatalSession(err, addr, port, &diag);
+
+        if (upgrade.handshook) tls_client.end() catch {};
+        stream_writer.interface.flush() catch {};
+
+        if (handshake_only) {
+            std.debug.print("smtp-notify: STARTTLS handshake + EHLO ok via {s}:{d}\n", .{ addr, port });
+        } else {
+            std.debug.print("smtp-notify: delivered via {s}:{d} (STARTTLS)\n", .{ addr, port });
+        }
+        return;
+    }
+
+    tls_client = TlsClient.init(
         &stream_reader.interface,
         &stream_writer.interface,
-        .{
-            .host = .{ .explicit = addr },
-            .ca = .{ .bundle = .{
-                .gpa = gpa,
-                .io = io,
-                .lock = &bundle_lock,
-                .bundle = &bundle,
-            } },
-            .read_buffer = tls_read_buf,
-            .write_buffer = tls_write_buf,
-            .entropy = &entropy,
-            .realtime_now = now,
-            // SMTP replies carry no length framing, so keep truncation-attack
-            // detection on (the default) — unlike HTTP, we cannot detect a
-            // cut-off stream at the application layer.
-        },
+        tls_options,
     ) catch |err| fatal("TLS handshake with {s}:{d} failed: {t}", .{ addr, port, err });
 
     smtp.runSessionDiag(cfg, .{
@@ -310,6 +346,47 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("smtp-notify: delivered via {s}:{d} (TLS)\n", .{ addr, port });
     }
 }
+
+/// Performs the in-place TLS handshake the SMTP driver asks for once the
+/// server has accepted STARTTLS.
+///
+/// src/smtp.zig deliberately knows nothing about TLS, so the handshake
+/// arrives as a callback. Everything it needs is captured before the session
+/// starts: by the time this runs, the socket is mid-dialogue and there is no
+/// way to report a setup failure other than aborting the session.
+const TlsUpgrade = struct {
+    /// Storage owned by `main`, so the client outlives this callback.
+    client: *TlsClient,
+    options: TlsClient.Options,
+    input: *std.Io.Reader,
+    output: *std.Io.Writer,
+    addr: []const u8,
+    port: u16,
+    /// Set once the handshake succeeds, so main knows whether a close_notify
+    /// is owed. Sending one over a client that never handshook is undefined.
+    handshook: bool = false,
+
+    fn run(ctx: *anyopaque) anyerror!smtp.Wire {
+        const self: *TlsUpgrade = @ptrCast(@alignCast(ctx));
+        self.client.* = TlsClient.init(self.input, self.output, self.options) catch |err| {
+            // Distinguish "the server would not upgrade" from "the upgrade
+            // itself failed": they need opposite fixes, and the session error
+            // that follows cannot tell them apart on its own.
+            std.debug.print(
+                "smtp-notify: {s}:{d} accepted STARTTLS but the TLS handshake failed: {t}\n",
+                .{ self.addr, self.port, err },
+            );
+            return err;
+        };
+        self.handshook = true;
+        return .{
+            .r = &self.client.reader,
+            .w = &self.client.writer,
+            // Encrypted records still have to reach the socket.
+            .below = self.output,
+        };
+    }
+};
 
 fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.Diagnostic) noreturn {
     // The server's own words, when it got as far as saying any. Without this a
@@ -336,7 +413,8 @@ fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.
             );
         } else {
             std.debug.print(
-                "smtp-notify: {s}:{d} advertised no AUTH mechanisms at all — it may require STARTTLS before authenticating\n",
+                "smtp-notify: {s}:{d} advertised no AUTH mechanisms at all — it likely requires\n" ++
+                    "  STARTTLS first. Set SMTP_SECURE: starttls (port 587).\n",
                 .{ addr, port },
             );
         }
@@ -348,6 +426,19 @@ fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.
         error.HeaderInjection => fatal("CR/LF in a header-bound input (from/to/subject) — refusing to send", .{}),
         error.NoRecipients => fatal("MAIL_TO contains no recipients", .{}),
         error.ReplyMalformed => fatal("{s}:{d} sent something that is not an SMTP reply line", .{ addr, port }),
+        // The three STARTTLS failures need three different actions, so
+        // they must not collapse into one message.
+        error.StartTlsNotOffered => fatal(
+            "{s}:{d} does not advertise STARTTLS, and SMTP_SECURE selects it. " ++
+                "Refusing to continue unencrypted. Check the port (587 for submission, " ++
+                "465 for implicit TLS with SMTP_SECURE: true).",
+            .{ addr, port },
+        ),
+        error.StartTlsUpgradeFailed => fatal(
+            "the TLS handshake with {s}:{d} failed after it accepted STARTTLS (reason above)",
+            .{ addr, port },
+        ),
+        error.StartTlsUnconfigured => fatal("internal: STARTTLS selected with no upgrader wired", .{}),
         else => fatal("session with {s}:{d} failed: {t}", .{ addr, port, err }),
     }
 }

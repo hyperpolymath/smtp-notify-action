@@ -23,14 +23,15 @@ inputs:
     description: >-
       Transport selection, fail-closed. "true" (default) or "implicit" =
       implicit TLS from the first byte (SMTPS, normally port 465). "false" or
-      "starttls" = STARTTLS on a plain connection, which is accepted but NOT
-      YET IMPLEMENTED, so the step fails with a clear message rather than
-      silently falling back to plaintext (issue #5). "plaintext" = no TLS at
-      all, which sends the password base64-encoded in the clear; use it only
-      against a containerized test sink. Any other value is rejected outright.
-      Note the difference from dawidd6/action-send-mail, where "false" means
-      "STARTTLS when the server offers it": here it fails instead of
-      downgrading, because an unrecognised value used to mean plaintext.
+      "starttls" = start in the clear and upgrade with STARTTLS (RFC 3207,
+      normally port 587); the upgrade is MANDATORY, so a server that does not
+      advertise STARTTLS fails the step rather than being talked to in the
+      clear. "plaintext" = no TLS at all, which sends the password
+      base64-encoded in the clear; use it only against a containerized test
+      sink. Any other value is rejected outright. Note the difference from
+      dawidd6/action-send-mail, where "false" means "STARTTLS when the server
+      offers it": here a server that does not offer it is an error, not a
+      downgrade.
     required: false
     default: 'true'
   username:

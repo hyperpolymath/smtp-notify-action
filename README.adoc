@@ -62,9 +62,10 @@ on and cannot be turned off by any input.
 |`server_port` |`465` |SMTP server port.
 |`secure` |`true` |Fail-closed transport selection, five accepted values.
 `true` or `implicit` = implicit TLS from the first byte (SMTPS).
-`false` or `starttls` = STARTTLS, which is accepted but *not yet implemented*,
-so the step fails with a message rather than downgrading
-(https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]).
+`false` or `starttls` = start in the clear and upgrade with STARTTLS
+(RFC 3207, normally port 587). The upgrade is *mandatory*: a server that does
+not advertise `STARTTLS` fails the step, because the alternative to upgrading
+is to stop, not to carry on in the clear.
 `plaintext` = no TLS, intended only for containerized test sinks. Any other
 value is rejected outright.
 |`username` |— |AUTH PLAIN username.
@@ -154,9 +155,9 @@ always downloads the binary generation it was reviewed with.
 == Further reading
 
 * link:MIGRATION.adoc[`MIGRATION.adoc`] — moving a `dawidd6/action-send-mail`
-  step across: which inputs transfer, which have drifted, and the two
-  blockers (Microsoft 365, STARTTLS) that mean some workflows should not move
-  yet.
+  step across: which inputs transfer, which have drifted, and the one
+  remaining blocker — Microsoft 365, which still needs `AUTH LOGIN` — that
+  means some workflows should not move yet.
 * link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] — what is wrong with *this*
   code, stated by us rather than discovered by you, plus the exact boundary of
   the proof claim and why no CVE has been assigned.

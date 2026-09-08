@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Table-driven SMTP client session.
 //!
-//! The `script` table in src/generated/smtp_fsm.zig — generated from the
-//! proven Idris2 spec — is the ONLY protocol authority here: this module
-//! walks it phase by phase and refuses any reply the current row does not
-//! list. It talks to generic `std.Io.Reader`/`std.Io.Writer`, so the unit
+//! The script tables in src/generated/smtp_fsm.zig — generated from the
+//! proven Idris2 spec — are the ONLY protocol authority here: this module
+//! walks one phase by phase and refuses any reply the current row does
+//! not list. There are two, chosen by `Config.use_starttls`: a session
+//! over an already-encrypted stream, and one that begins in cleartext
+//! on the submission port and upgrades in place (RFC 3207). Each is
+//! proven separately, including that the upgrade is on the walked path.
+//! It talks to generic `std.Io.Reader`/`std.Io.Writer`, so the unit
 //! tests below drive whole sessions against scripted in-memory replies with
 //! no network involved; main.zig supplies TLS- or TCP-backed streams.
 
@@ -27,6 +31,13 @@ pub const Config = struct {
     /// Greeting + EHLO + QUIT only — proves reachability and TLS without
     /// authenticating or sending mail.
     handshake_only: bool = false,
+    /// Begin in cleartext and issue STARTTLS after the first EHLO
+    /// (RFC 3207), rather than expecting an already-encrypted stream.
+    /// Selects the other proven table; requires `upgrader`.
+    use_starttls: bool = false,
+    /// Performs the TLS handshake once the server accepts STARTTLS.
+    /// Required when `use_starttls` is set, ignored otherwise.
+    upgrader: ?Upgrader = null,
 };
 
 pub const SessionError = error{
@@ -37,6 +48,9 @@ pub const SessionError = error{
     NoRecipients,
     ReplyMalformed,
     AuthTooLong,
+    StartTlsNotOffered, // asked to upgrade, but EHLO never advertised STARTTLS
+    StartTlsUnconfigured, // use_starttls set with no upgrader to call
+    StartTlsUpgradeFailed, // the server said 220 and the handshake still failed
 };
 
 pub const Error = SessionError || std.Io.Reader.DelimiterError || std.Io.Writer.Error;
@@ -174,17 +188,16 @@ pub const Diagnostic = struct {
         return d.buf[0..d.len];
     }
 
-    fn record(d: *Diagnostic, phase: fsm.Phase, reply: Reply) void {
+    fn record(d: *Diagnostic, phase: fsm.Phase, reply: Reply, caps: Capabilities) void {
         d.phase = phase;
         d.code = reply.code;
         const n = @min(reply.text.len, d.buf.len);
         @memcpy(d.buf[0..n], reply.text[0..n]);
         d.len = n;
         d.truncated = reply.truncated or n < reply.text.len;
-        // Parsed here rather than at the call site so every driver that
-        // passes a Diagnostic gets capabilities, not only the ones that
-        // remember to ask.
-        if (phase == .ehlo) d.caps = parseCapabilities(reply.text);
+        // The caller owns the parse: both EHLOs refresh it, and after
+        // an upgrade the post-encryption list is the only honest one.
+        d.caps = caps;
     }
 };
 
@@ -203,54 +216,112 @@ pub const Wire = struct {
     }
 };
 
-/// Walk the generated script from .connect to .done, sending each row's
-/// action and demanding a listed reply code before advancing.
+/// Turns the current stream into an encrypted one, in place, after the server
+/// has accepted STARTTLS.
+///
+/// The session driver deliberately knows nothing about TLS — it talks to
+/// generic readers and writers so the tests below can drive whole sessions
+/// against in-memory scripts. The upgrade is therefore a callback the caller
+/// supplies: main.zig hands over one backed by `src/tls/Client.zig`, and a
+/// test hands over one that simply swaps in a different in-memory stream,
+/// which is enough to prove the driver really does switch streams.
+pub const Upgrader = struct {
+    ctx: *anyopaque,
+    upgradeFn: *const fn (ctx: *anyopaque) anyerror!Wire,
+
+    pub fn upgrade(u: Upgrader) anyerror!Wire {
+        return u.upgradeFn(u.ctx);
+    }
+};
+
+/// Walk the generated script for this transport from .connect to .done,
+/// sending each row's action and demanding a listed reply code before
+/// advancing.
 pub fn runSession(cfg: Config, wire: Wire) Error!void {
     return runSessionDiag(cfg, wire, null);
 }
 
 /// As `runSession`, but records the last reply read into `diag` so a failure
 /// can be reported with the server's own explanation rather than a bare code.
-pub fn runSessionDiag(cfg: Config, wire: Wire, diag: ?*Diagnostic) Error!void {
-    const r = wire.r;
-    const w = wire.w;
+pub fn runSessionDiag(cfg: Config, wire_in: Wire, diag: ?*Diagnostic) Error!void {
+    // Mutable: a STARTTLS session replaces this with the encrypted stream
+    // partway through, and everything after the upgrade — including the
+    // courtesy QUIT below — must ride on the new one.
+    var wire = wire_in;
     if (!message.headerValueOk(cfg.subject)) return error.HeaderInjection;
     if (!message.headerValueOk(cfg.from)) return error.HeaderInjection;
     for (cfg.recipients) |rcpt| {
         if (!message.headerValueOk(rcpt)) return error.HeaderInjection;
     }
     if (!cfg.handshake_only and cfg.recipients.len == 0) return error.NoRecipients;
+    if (cfg.use_starttls and cfg.upgrader == null) return error.StartTlsUnconfigured;
 
     // Best-effort abort courtesy: on any failure mid-session, try to QUIT so
     // the server does not hold a half-open transaction.
     errdefer {
-        w.writeAll("QUIT\r\n") catch {};
+        wire.w.writeAll("QUIT\r\n") catch {};
         wire.flush() catch {};
     }
 
+    // Which of the two proven tables this session walks. Both are generated
+    // from the same spec and each is proven separately; nothing here may
+    // reach across from one shape to the other.
+    const table = fsm.scriptFor(cfg.use_starttls);
+
     var phase: fsm.Phase = .connect;
     var rcpt_index: usize = 0;
+    var caps: Capabilities = .{};
     var reply_buf: [reply_text_max]u8 = undefined;
     while (phase != .done) {
-        // Coverage of every non-terminal phase is proven in the spec
+        // Coverage of every phase a table uses is proven in the spec
         // (deterministicCoverage), so a missing row is unreachable.
-        const step = lookupStep(phase) orelse return error.ProtocolError;
-        try sendAction(cfg, step.send, rcpt_index, w);
+        const step = lookupStep(table, phase) orelse return error.ProtocolError;
+
+        // RFC 3207 §4: do not issue STARTTLS to a server that never offered
+        // it. Checked BEFORE the command goes out, because the alternative
+        // to upgrading is not "carry on unencrypted" — it is to stop. This
+        // is the same fail-closed rule as D-001; a downgrade that happens
+        // silently is the whole defect.
+        if (step.phase == .starttls and !caps.starttls) return error.StartTlsNotOffered;
+
+        try sendAction(cfg, step.send, rcpt_index, wire.w);
         try wire.flush();
-        const reply = try readReply(r, &reply_buf);
-        if (diag) |d| d.record(phase, reply);
+        const reply = try readReply(wire.r, &reply_buf);
+
+        // Both EHLOs refresh the capability set. RFC 3207 §4.2 requires the
+        // post-upgrade list to REPLACE the cleartext one — a server may
+        // advertise different mechanisms once the session is encrypted, and
+        // trusting the unprotected greeting is trusting an attacker's edit
+        // of it.
+        if (step.phase == .ehlo or step.phase == .ehlo_tls) {
+            caps = parseCapabilities(reply.text);
+        }
+        if (diag) |d| d.record(phase, reply, caps);
         try checkReply(step, reply.code);
+
+        // The handshake itself: the server has said 220 and is waiting for a
+        // TLS ClientHello, not for another SMTP verb.
+        if (step.phase == .starttls) {
+            const up = cfg.upgrader orelse return error.StartTlsUnconfigured;
+            wire = up.upgrade() catch return error.StartTlsUpgradeFailed;
+        }
+
         if (step.repeats) {
             rcpt_index += 1;
             if (rcpt_index < cfg.recipients.len) continue; // same row, next recipient
         }
-        // handshake_only: once EHLO succeeded, skip straight to QUIT.
+        // handshake_only stops before authenticating. `step.next == .auth`
+        // says exactly that, and says it in BOTH tables: the implicit table
+        // reaches .auth from .ehlo, the STARTTLS table from .ehlo_tls. So a
+        // handshake-only probe on 587 still performs the upgrade and the
+        // second EHLO — which is the point, since a reachability probe that
+        // skipped the upgrade would prove nothing about TLS.
         phase = if (cfg.handshake_only and step.next == .auth) .quit else step.next;
     }
 }
 
-fn lookupStep(phase: fsm.Phase) ?fsm.Step {
-    for (fsm.script) |s| {
+fn lookupStep(table: []const fsm.Step, phase: fsm.Phase) ?fsm.Step {
+    for (table) |s| {
         if (s.phase == phase) return s;
     }
     return null;
@@ -260,7 +331,8 @@ fn sendAction(cfg: Config, action: fsm.Action, rcpt_index: usize, w: *std.Io.Wri
     switch (action) {
         .none => {}, // server speaks first (greeting)
         .ehlo => try w.print("EHLO {s}\r\n", .{cfg.ehlo_domain}),
-        .auth_plain => try writeAuthPlain(w, cfg.username, cfg.password),
+        .starttls => try w.writeAll("STARTTLS\r\n"),
+        .auth => try writeAuthPlain(w, cfg.username, cfg.password),
         .mail_from => try w.print("MAIL FROM:<{s}>\r\n", .{angleAddr(cfg.from)}),
         .rcpt_to => try w.print("RCPT TO:<{s}>\r\n", .{angleAddr(cfg.recipients[rcpt_index])}),
         .data => try w.writeAll("DATA\r\n"),
@@ -691,4 +763,205 @@ test "a session records the server's capabilities, not only its failures" {
     try std.testing.expect(diag.caps.auth_login);
     try std.testing.expect(!diag.caps.auth_plain);
     try std.testing.expectEqualStrings("LOGIN XOAUTH2", diag.caps.authMechanisms());
+}
+
+/// Swaps in a *different* pair of in-memory streams when the driver calls
+/// for the upgrade. Using different streams rather than the same ones is the
+/// whole point: if the driver forgot to replace its wire, the post-upgrade
+/// dialogue would be read from — and written to — the cleartext pair, and
+/// every assertion below would fail.
+const TestUpgrade = struct {
+    r: *std.Io.Reader,
+    w: *std.Io.Writer,
+    calls: usize = 0,
+
+    fn upgrade(ctx: *anyopaque) anyerror!Wire {
+        const self: *TestUpgrade = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        return .{ .r = self.r, .w = self.w };
+    }
+
+    fn upgrader(self: *TestUpgrade) Upgrader {
+        return .{ .ctx = self, .upgradeFn = TestUpgrade.upgrade };
+    }
+};
+
+test "STARTTLS: the session moves onto the upgraded stream and stays there" {
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n" ++
+            "220 2.0.0 Ready to start TLS\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed(
+        "250-mail.example.org\r\n250 AUTH PLAIN LOGIN\r\n" ++
+            "235 2.7.0 Accepted\r\n" ++ // AUTH
+            "250 2.1.0 Ok\r\n" ++ // MAIL FROM
+            "250 2.1.5 Ok\r\n250 2.1.5 Ok\r\n" ++ // two RCPT TO
+            "354 End data with <CR><LF>.<CR><LF>\r\n" ++
+            "250 2.0.0 Ok: queued\r\n" ++
+            "221 2.0.0 Bye\r\n",
+    );
+    var tls_buf: [8192]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+
+    var diag: Diagnostic = .{};
+    try runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, &diag);
+
+    try std.testing.expectEqual(@as(usize, 1), up.calls);
+
+    // Cleartext: EHLO and STARTTLS, and nothing that carries a secret.
+    const clear = clear_buf[0..clear_w.end];
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nSTARTTLS\r\n", clear);
+
+    // Encrypted: the mandatory second EHLO (RFC 3207 4.2) and the whole
+    // remainder of the transaction.
+    const tls = tls_buf[0..tls_w.end];
+    try std.testing.expect(std.mem.startsWith(u8, tls, "EHLO github-actions\r\nAUTH PLAIN "));
+    try std.testing.expect(std.mem.indexOf(u8, tls, "MAIL FROM:<bot@example.org>\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tls, "RCPT TO:<one@example.com>\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tls, "RCPT TO:<two@example.net>\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, tls, "QUIT\r\n"));
+    try std.testing.expectEqual(fsm.Phase.quit, diag.phase);
+}
+
+test "STARTTLS: the post-upgrade EHLO replaces the cleartext capability list" {
+    // RFC 3207 4.2 — the pre-upgrade list is unauthenticated and a server may
+    // legitimately advertise differently once encrypted. Here the cleartext
+    // greeting claims only PLAIN and the encrypted one only LOGIN; the
+    // diagnostic must end up reporting the encrypted answer.
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n" ++
+            "220 Ready to start TLS\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed(
+        "250-mail.example.org\r\n250 AUTH LOGIN\r\n" ++
+            "535 5.7.8 Authentication unsuccessful\r\n",
+    );
+    var tls_buf: [4096]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(
+        error.PermanentFailure,
+        runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, &diag),
+    );
+    try std.testing.expectEqual(fsm.Phase.auth, diag.phase);
+    try std.testing.expectEqualStrings("LOGIN", diag.caps.authMechanisms());
+    try std.testing.expect(diag.caps.auth_login);
+    try std.testing.expect(!diag.caps.auth_plain);
+    // The cleartext list said PLAIN. Reporting it here would tell the
+    // operator the opposite of the truth.
+}
+
+test "STARTTLS: a server that does not advertise it gets no command and no fallback" {
+    // The alternative to upgrading is to stop. D-001 was exactly this shape:
+    // a transport failure that quietly continued in the clear.
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250 AUTH PLAIN\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed("250 unreachable\r\n");
+    var tls_buf: [4096]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+
+    try std.testing.expectError(
+        error.StartTlsNotOffered,
+        runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, null),
+    );
+    try std.testing.expectEqual(@as(usize, 0), up.calls);
+
+    // The guard runs BEFORE the command, so STARTTLS never went out; and
+    // nothing carrying the password did either. Only the courtesy QUIT.
+    const clear = clear_buf[0..clear_w.end];
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nQUIT\r\n", clear);
+}
+
+test "STARTTLS: selected without an upgrader is refused before anything is sent" {
+    var r: std.Io.Reader = .fixed("220 mail.example.org ESMTP\r\n");
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    var cfg = test_cfg;
+    cfg.use_starttls = true; // .upgrader deliberately left null
+    try std.testing.expectError(
+        error.StartTlsUnconfigured,
+        runSessionDiag(cfg, .{ .r = &r, .w = &w }, null),
+    );
+    try std.testing.expectEqual(@as(usize, 0), w.end);
+}
+
+test "STARTTLS: a handshake-only probe still upgrades before quitting" {
+    // `handshake_only` stops before authenticating, not before encrypting —
+    // a reachability probe that skipped the upgrade would prove nothing about
+    // whether TLS works against this server, which is the only reason to run
+    // one against port 587.
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n" ++
+            "220 Ready to start TLS\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed(
+        "250-mail.example.org\r\n250 AUTH PLAIN LOGIN\r\n" ++
+            "221 2.0.0 Bye\r\n",
+    );
+    var tls_buf: [4096]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+    cfg.handshake_only = true;
+
+    var diag: Diagnostic = .{};
+    try runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, &diag);
+
+    try std.testing.expectEqual(@as(usize, 1), up.calls);
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nSTARTTLS\r\n", clear_buf[0..clear_w.end]);
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nQUIT\r\n", tls_buf[0..tls_w.end]);
+    try std.testing.expectEqual(fsm.Phase.quit, diag.phase);
+    try std.testing.expect(diag.caps.auth_login); // read from the encrypted EHLO
+}
+
+test "the implicit table has no upgrade rows to walk" {
+    // The shipping transport must be unchanged in shape by all of the above.
+    // Proven in the spec as `implicitHasNoUpgrade`; asserted here against the
+    // generated table the driver actually walks.
+    for (fsm.scriptFor(false)) |s| {
+        try std.testing.expect(s.phase != .starttls);
+        try std.testing.expect(s.phase != .ehlo_tls);
+        try std.testing.expect(s.send != .starttls);
+    }
+    var saw_starttls = false;
+    for (fsm.scriptFor(true)) |s| {
+        if (s.phase == .starttls) saw_starttls = true;
+    }
+    try std.testing.expect(saw_starttls);
 }
