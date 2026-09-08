@@ -321,6 +321,26 @@ fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.
             .{ addr, port, diag.code, diag.phase, diag.text(), if (diag.truncated) " […]" else "" },
         );
     }
+    // D-006: an auth failure that does not say what was on offer leaves the
+    // operator guessing between a wrong password and an unsupported
+    // mechanism. Those need opposite fixes, so they must not look alike.
+    if (diag.phase == .auth) {
+        if (diag.caps.authMechanisms().len > 0) {
+            std.debug.print(
+                "smtp-notify: this client authenticated with AUTH PLAIN; {s}:{d} advertised: {s}\n",
+                .{ addr, port, diag.caps.authMechanisms() },
+            );
+            if (!diag.caps.auth_plain) std.debug.print(
+                "smtp-notify: the server did NOT advertise PLAIN — this is a mechanism mismatch, not a bad password\n",
+                .{},
+            );
+        } else {
+            std.debug.print(
+                "smtp-notify: {s}:{d} advertised no AUTH mechanisms at all — it may require STARTTLS before authenticating\n",
+                .{ addr, port },
+            );
+        }
+    }
     switch (err) {
         error.TransientFailure => fatal("{s}:{d} replied 4xx (transient failure) — retry later", .{ addr, port }),
         error.PermanentFailure => fatal("{s}:{d} replied 5xx (permanent failure) — check credentials/addresses", .{ addr, port }),

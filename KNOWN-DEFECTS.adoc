@@ -106,11 +106,17 @@ plaintext, so this costs reachability, not confidentiality.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/5[#5]
 
 |D-006
-|No EHLO capability parsing. The action assumes `AUTH PLAIN` is available
-instead of reading what the server offers, so a server that offers only other
-mechanisms fails at AUTH with no explanation of why.
+|No EHLO capability parsing. The action assumed `AUTH PLAIN` was available
+instead of reading what the server offers, so a server offering only other
+mechanisms failed at AUTH with no explanation of why.
 |Medium
-|Open
+|Fixed on `main`; unreleased. The EHLO reply is parsed into a `Capabilities`
+value (`STARTTLS`, the `AUTH` mechanism list including the Exchange `AUTH=`
+spelling, `SIZE`, `8BITMIME`), carried on the session `Diagnostic`, and an AUTH
+failure now names what the server advertised — so "wrong password" and
+"mechanism this client cannot speak" stop looking alike. *Choosing* a mechanism
+from that list is D-007 and is still open; this defect was the reading and the
+reporting, both of which are done.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/9[#9]
 
 |D-007

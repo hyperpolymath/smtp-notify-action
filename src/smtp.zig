@@ -66,6 +66,93 @@ pub const Reply = struct {
     truncated: bool = false,
 };
 
+/// Cap on the retained AUTH mechanism list. Long enough for every mechanism
+/// list observed from Gmail, Microsoft 365 and Postfix. A longer one is
+/// truncated for the *log* only — the booleans below are set from the whole
+/// line, so a truncated diagnostic can never change a decision.
+const auth_raw_max = 128;
+
+/// What the server said it can do, parsed from the EHLO reply (#9, D-006).
+///
+/// RFC 5321 4.1.1.1: EHLO keywords are case-insensitive, so every match here
+/// folds case. The reply's first line is the server's greeting and domain,
+/// never a capability, so it is skipped.
+///
+/// This exists so the client can *choose* rather than assume: refuse STARTTLS
+/// on a server that never offered it, pick an AUTH mechanism the server
+/// actually supports, and — when something fails anyway — say what was on
+/// offer instead of only what failed.
+pub const Capabilities = struct {
+    starttls: bool = false,
+    auth_plain: bool = false,
+    auth_login: bool = false,
+    auth_xoauth2: bool = false,
+    eight_bit_mime: bool = false,
+    /// The SIZE parameter's value, when the server gave a parseable one.
+    size: ?u64 = null,
+    /// The AUTH line's mechanism list, verbatim and bounded, for diagnostics.
+    /// Server bytes only — no credential can reach it.
+    auth_raw: [auth_raw_max]u8 = undefined,
+    auth_raw_len: usize = 0,
+
+    /// The mechanisms the server named, as it spelled them. Empty when the
+    /// server advertised no AUTH line at all.
+    pub fn authMechanisms(c: *const Capabilities) []const u8 {
+        return c.auth_raw[0..c.auth_raw_len];
+    }
+
+    /// True when at least one mechanism this client can drive was offered.
+    pub fn anyKnownAuth(c: *const Capabilities) bool {
+        return c.auth_plain or c.auth_login or c.auth_xoauth2;
+    }
+};
+
+/// Parse an EHLO reply's accumulated text into `Capabilities`.
+///
+/// `text` is exactly what `readReply` produced: every line, '\n'-separated,
+/// with the three-digit code and its '-'/' ' separator already stripped. No
+/// allocation, no I/O — this is a pure function over bytes already read, and
+/// is tested as one.
+pub fn parseCapabilities(text: []const u8) Capabilities {
+    var caps: Capabilities = .{};
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = lines.next(); // greeting line: the domain, not a capability
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        // The keyword runs to the first space or '='. Exchange has been seen
+        // to spell the mechanism list "AUTH=LOGIN" as well as "AUTH LOGIN",
+        // and a client that reads only the second form silently concludes
+        // the server offers no authentication at all.
+        const kw_end = std.mem.indexOfAny(u8, line, " =") orelse line.len;
+        const keyword = line[0..kw_end];
+        const rest = std.mem.trim(u8, line[@min(kw_end + 1, line.len)..], " \t");
+        if (std.ascii.eqlIgnoreCase(keyword, "STARTTLS")) {
+            caps.starttls = true;
+        } else if (std.ascii.eqlIgnoreCase(keyword, "8BITMIME")) {
+            caps.eight_bit_mime = true;
+        } else if (std.ascii.eqlIgnoreCase(keyword, "SIZE")) {
+            // An unparseable SIZE is "unstated", not zero: a zero would read
+            // as "this server accepts no message at all".
+            caps.size = std.fmt.parseInt(u64, rest, 10) catch null;
+        } else if (std.ascii.eqlIgnoreCase(keyword, "AUTH")) {
+            const n = @min(rest.len, caps.auth_raw.len);
+            @memcpy(caps.auth_raw[0..n], rest[0..n]);
+            caps.auth_raw_len = n;
+            var mechs = std.mem.tokenizeAny(u8, rest, " \t=");
+            while (mechs.next()) |m| {
+                if (std.ascii.eqlIgnoreCase(m, "PLAIN")) {
+                    caps.auth_plain = true;
+                } else if (std.ascii.eqlIgnoreCase(m, "LOGIN")) {
+                    caps.auth_login = true;
+                } else if (std.ascii.eqlIgnoreCase(m, "XOAUTH2")) {
+                    caps.auth_xoauth2 = true;
+                }
+            }
+        }
+    }
+    return caps;
+}
 /// Carries the last reply out of a failed session so the caller can print the
 /// server's explanation. Only ever holds bytes the *server* sent — no
 /// credential can reach it.
@@ -78,6 +165,11 @@ pub const Diagnostic = struct {
     len: usize = 0,
     truncated: bool = false,
 
+    /// What the server advertised at EHLO. Set when the EHLO reply is read,
+    /// so a later AUTH failure can name what was actually on offer instead of
+    /// leaving the operator to guess (D-006).
+    caps: Capabilities = .{},
+
     pub fn text(d: *const Diagnostic) []const u8 {
         return d.buf[0..d.len];
     }
@@ -89,6 +181,10 @@ pub const Diagnostic = struct {
         @memcpy(d.buf[0..n], reply.text[0..n]);
         d.len = n;
         d.truncated = reply.truncated or n < reply.text.len;
+        // Parsed here rather than at the call site so every driver that
+        // passes a Diagnostic gets capabilities, not only the ones that
+        // remember to ask.
+        if (phase == .ehlo) d.caps = parseCapabilities(reply.text);
     }
 };
 
@@ -490,4 +586,109 @@ test "runSessionDiag carries the failing reply out to the caller" {
     try std.testing.expectEqual(fsm.Phase.auth, diag.phase);
     try std.testing.expectEqual(@as(u16, 535), diag.code);
     try std.testing.expectEqualStrings("5.7.8 Username and Password not accepted", diag.text());
+}
+
+test "parseCapabilities reads a real multi-line EHLO reply" {
+    // Exactly the shape readReply produces: greeting line first, then one
+    // capability per line, code and separator already stripped.
+    const caps = parseCapabilities(
+        "mail.example.org\nPIPELINING\nSIZE 35882577\n8BITMIME\nSTARTTLS\nAUTH LOGIN PLAIN XOAUTH2",
+    );
+    try std.testing.expect(caps.starttls);
+    try std.testing.expect(caps.eight_bit_mime);
+    try std.testing.expect(caps.auth_plain);
+    try std.testing.expect(caps.auth_login);
+    try std.testing.expect(caps.auth_xoauth2);
+    try std.testing.expectEqual(@as(?u64, 35882577), caps.size);
+    try std.testing.expectEqualStrings("LOGIN PLAIN XOAUTH2", caps.authMechanisms());
+}
+
+test "parseCapabilities: the greeting line is not a capability" {
+    // A server whose hostname happens to contain a keyword must not be read
+    // as advertising it. This is why the first line is skipped by position
+    // rather than by pattern.
+    const caps = parseCapabilities("starttls.example.org\nPIPELINING");
+    try std.testing.expect(!caps.starttls);
+}
+
+test "parseCapabilities: a single-line 250 advertises nothing" {
+    const caps = parseCapabilities("mail.example.org");
+    try std.testing.expect(!caps.starttls);
+    try std.testing.expect(!caps.anyKnownAuth());
+    try std.testing.expectEqualStrings("", caps.authMechanisms());
+    try std.testing.expectEqual(@as(?u64, null), caps.size);
+}
+
+test "parseCapabilities folds case, as RFC 5321 requires" {
+    const caps = parseCapabilities("mail.example.org\nstarttls\nauth login");
+    try std.testing.expect(caps.starttls);
+    try std.testing.expect(caps.auth_login);
+    try std.testing.expect(!caps.auth_plain);
+}
+
+test "parseCapabilities reads the Exchange 'AUTH=LOGIN' spelling" {
+    // Reading only "AUTH LOGIN" makes a server that offers authentication
+    // look like one that offers none — a silent, misdirected failure.
+    const caps = parseCapabilities("mail.example.org\nAUTH=LOGIN");
+    try std.testing.expect(caps.auth_login);
+    try std.testing.expect(caps.anyKnownAuth());
+}
+
+test "parseCapabilities: LOGIN-only server is distinguishable from PLAIN-only" {
+    const login_only = parseCapabilities("mx.example.net\nSTARTTLS\nAUTH LOGIN");
+    try std.testing.expect(login_only.auth_login);
+    try std.testing.expect(!login_only.auth_plain);
+
+    const plain_only = parseCapabilities("mx.example.net\nSTARTTLS\nAUTH PLAIN");
+    try std.testing.expect(plain_only.auth_plain);
+    try std.testing.expect(!plain_only.auth_login);
+}
+
+test "parseCapabilities: an unparseable SIZE is unstated, not zero" {
+    // Zero would read as "this server accepts no message at all".
+    const caps = parseCapabilities("mail.example.org\nSIZE unlimited");
+    try std.testing.expectEqual(@as(?u64, null), caps.size);
+}
+
+test "parseCapabilities: an over-long AUTH list truncates the log, not the decision" {
+    var line: [auth_raw_max + 64]u8 = undefined;
+    @memset(&line, 'X');
+    var buf: [auth_raw_max + 128]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "mail.example.org\nAUTH PLAIN {s}", .{line});
+    const caps = parseCapabilities(text);
+    try std.testing.expect(caps.auth_plain); // decision unaffected
+    try std.testing.expectEqual(auth_raw_max, caps.authMechanisms().len);
+}
+
+test "a session records the server's capabilities, not only its failures" {
+    // The greeting advertises STARTTLS and LOGIN; the session then fails at
+    // AUTH. The diagnostic must carry both facts, because "535" alone does
+    // not tell an operator that they asked for a mechanism on offer.
+    var diag: Diagnostic = .{};
+    var reader = std.Io.Reader.fixed(
+        "220 mx.example.net ESMTP\r\n" ++
+            "250-mx.example.net\r\n250-STARTTLS\r\n250 AUTH LOGIN XOAUTH2\r\n" ++
+            "535 5.7.8 Authentication unsuccessful\r\n",
+    );
+    var out: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    const cfg: Config = .{
+        .ehlo_domain = "github-actions",
+        .username = "u",
+        .password = "p",
+        .from = "Bot <bot@example.org>",
+        .recipients = &.{"to@example.org"},
+        .subject = "s",
+        .body = "b",
+        .date_epoch_seconds = 0,
+    };
+    try std.testing.expectError(
+        error.PermanentFailure,
+        runSessionDiag(cfg, .{ .r = &reader, .w = &writer }, &diag),
+    );
+    try std.testing.expectEqual(@as(u16, 535), diag.code);
+    try std.testing.expect(diag.caps.starttls);
+    try std.testing.expect(diag.caps.auth_login);
+    try std.testing.expect(!diag.caps.auth_plain);
+    try std.testing.expectEqualStrings("LOGIN XOAUTH2", diag.caps.authMechanisms());
 }
