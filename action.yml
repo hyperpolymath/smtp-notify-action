@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
 name: 'SMTP Notify'
 description: >-
-  Send a plain-text notification email over implicit TLS (SMTPS) from a
-  workflow. Node-free: one static Zig binary with zero dependencies, whose
-  SMTP session is formally specified in Idris2 and machine-checked.
-  Implements nine dawidd6/action-send-mail input names; it is a migration
-  target, not a full replacement.
+  Send a plain-text notification email from a workflow over SMTPS (implicit
+  TLS, port 465) or STARTTLS on the submission port (587), which is what
+  Google Workspace expects and Microsoft 365 requires. Node-free: one static Zig
+  binary with zero dependencies, whose SMTP session is formally specified in
+  Idris2 and machine-checked. Implements nine dawidd6/action-send-mail input
+  names; it is a migration target, not a full replacement.
 author: 'hyperpolymath'
 branding:
   icon: 'mail'
