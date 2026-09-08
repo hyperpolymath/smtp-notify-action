@@ -155,9 +155,8 @@ always downloads the binary generation it was reviewed with.
 == Further reading
 
 * link:MIGRATION.adoc[`MIGRATION.adoc`] — moving a `dawidd6/action-send-mail`
-  step across: which inputs transfer, which have drifted, and the one
-  remaining blocker — Microsoft 365, which still needs `AUTH LOGIN` — that
-  means some workflows should not move yet.
+  step across: which inputs transfer, which have drifted, and the two
+  provider notes that decide whether a workflow can move today.
 * link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] — what is wrong with *this*
   code, stated by us rather than discovered by you, plus the exact boundary of
   the proof claim and why no CVE has been assigned.

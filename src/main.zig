@@ -403,12 +403,22 @@ fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.
     // mechanism. Those need opposite fixes, so they must not look alike.
     if (diag.phase == .auth) {
         if (diag.caps.authMechanisms().len > 0) {
+            // Name the mechanism this client actually chose. Hardcoding
+            // "AUTH PLAIN" here was true only until AUTH LOGIN existed, and a
+            // diagnostic that misreports the mechanism sends the operator to
+            // the wrong fix.
             std.debug.print(
-                "smtp-notify: this client authenticated with AUTH PLAIN; {s}:{d} advertised: {s}\n",
-                .{ addr, port, diag.caps.authMechanisms() },
+                "smtp-notify: this client used AUTH {s}; {s}:{d} advertised: {s}\n",
+                .{
+                    if (diag.mechanism) |m| @tagName(m) else "(none chosen)",
+                    addr,
+                    port,
+                    diag.caps.authMechanisms(),
+                },
             );
-            if (!diag.caps.auth_plain) std.debug.print(
-                "smtp-notify: the server did NOT advertise PLAIN — this is a mechanism mismatch, not a bad password\n",
+            if (diag.mechanism == null) std.debug.print(
+                "smtp-notify: none of those is a mechanism this client speaks (PLAIN, LOGIN).\n" ++
+                    "  XOAUTH2 needs an OAuth token, which no password secret can supply.\n",
                 .{},
             );
         } else {
@@ -439,6 +449,11 @@ fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.
             .{ addr, port },
         ),
         error.StartTlsUnconfigured => fatal("internal: STARTTLS selected with no upgrader wired", .{}),
+        error.AuthMechanismUnsupported => fatal(
+            "{s}:{d} offers no AUTH mechanism this client can drive (see the advertised list above). " ++
+                "No credential was sent. PLAIN and LOGIN are supported; XOAUTH2 is not.",
+            .{ addr, port },
+        ),
         else => fatal("session with {s}:{d} failed: {t}", .{ addr, port, err }),
     }
 }

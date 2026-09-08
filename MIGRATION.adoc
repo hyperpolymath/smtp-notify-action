@@ -61,34 +61,40 @@ The migration rule follows from that:
   `STARTTLS` — dawidd6 would send in the clear, this action stops. Do not
   reach for `plaintext` if that happens; check the port first.
 
-== Read this second: Microsoft 365 cannot be authenticated to yet
+== Read this second: Microsoft 365 works on port 587, not 465
 
-If your dawidd6 step sends through `smtp.office365.com`, *do not migrate yet*.
-This is a separate blocker from the `secure` change above, and switching to
-port 465 does not work around it. The action can now reach the server; it
-cannot log in.
+If your dawidd6 step sends through `smtp.office365.com`, one thing changes and
+one thing does not: you must be on port 587 with `secure: starttls`, and port
+465 will never work.
 
-Both of these were probed on 2026-09-02:
+Probed 2026-09-02, re-probed live on 2026-09-09:
 
 * `smtp.office365.com:587` advertises exactly `AUTH LOGIN XOAUTH2`. It does not
-  offer `AUTH PLAIN`, which is the only mechanism this action implements.
+  offer `AUTH PLAIN`.
 * `smtp.office365.com:465` has no listener at all, so the implicit-TLS path
-  this action does support cannot connect.
+  cannot connect and no setting works around that.
 
-Two of the three pieces are now on `main` (unreleased): STARTTLS on 587, and
-EHLO capability parsing
-(https://github.com/hyperpolymath/smtp-notify-action/issues/9[issue #9]). The
-action can now *connect* to `smtp.office365.com:587` and will tell you exactly
-which mechanisms were advertised. It still cannot *authenticate*: it sends
-`AUTH PLAIN`, which Microsoft 365 does not offer. That last piece is
-https://github.com/hyperpolymath/smtp-notify-action/issues/10[issue #10]
-(`AUTH LOGIN`). Migrating an Office 365 sender needs it closed.
+All three pieces are now on `main` (unreleased): STARTTLS on 587, EHLO
+capability parsing
+(https://github.com/hyperpolymath/smtp-notify-action/issues/9[issue #9]) and
+mechanism selection including `AUTH LOGIN`
+(https://github.com/hyperpolymath/smtp-notify-action/issues/10[issue #10]).
+The action reads the advertised list and picks `LOGIN` where `PLAIN` is absent,
+so Microsoft 365 is a supported provider from the next release rather than a
+documented blocker. A live handshake against `smtp.office365.com:587` was run
+on 2026-09-09; authentication itself is exercised by tests rather than against
+a live tenant, because no Microsoft 365 credential exists at any tier here.
 
-Google Workspace is unaffected, and so is any server that offers `AUTH PLAIN`
-on port 465. `smtp.gmail.com` was probed on the same day and offers `AUTH PLAIN`
-on both 587 and 465, with 465 accepting implicit TLS, so a Gmail-based dawidd6
-step already on port 465 ports across today. Other providers were not probed:
-check yours with `openssl s_client -connect host:465` before switching.
+`XOAUTH2` remains unimplemented and is not planned: it needs a token from an
+OAuth flow, which a repository secret cannot supply. If your tenant has
+disabled basic authentication for SMTP, no password-based client can send for
+it — that is a tenant policy, not a gap in this action.
+
+Google Workspace is unaffected. `smtp.gmail.com` offers `AUTH PLAIN` on both
+587 and 465, with 465 accepting implicit TLS, so a Gmail-based dawidd6 step
+already on port 465 ports across today; port 587 was verified live on
+2026-09-09 too. Other providers were not probed: check yours with
+`openssl s_client -connect host:465` before switching.
 
 == Inputs that transfer unchanged
 
@@ -227,7 +233,7 @@ nine-input subset and already on implicit TLS.
 
 == What you give up
 
-Microsoft 365 as a provider · HTML bodies · attachments ·
+HTML bodies · attachments ·
 cc/bcc/reply-to · custom headers · non-Linux runners · the ability to skip
 certificate verification · a large user base to search for answers in.
 

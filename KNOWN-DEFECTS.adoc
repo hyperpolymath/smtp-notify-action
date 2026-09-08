@@ -41,7 +41,7 @@ BUST-2026-001. |Not a vulnerability. Nobody but the operator can trigger it, it
 requires our own source to opt in, and it is a `TODO` in a dependency rather
 than a flaw in a shipped artefact. Recorded in the Bustfile.
 
-|*Missing capability* — no `AUTH LOGIN`. |An issue, not a defect.
+|*Missing capability* — no `XOAUTH2`. |An issue, not a defect.
 Listed here only where its absence changes what a user should do.
 |===
 
@@ -110,8 +110,9 @@ goes out, so nothing carrying a credential is ever written to a cleartext
 stream. The generated state machine carries two proven tables — the implicit
 one is proven to contain no upgrade rows, the STARTTLS one is proven to reach
 them from the start state (`upgradeIsOnThePath`), which is what a per-row
-proof alone does not establish. *Choosing* an AUTH mechanism is D-007 and is
-still open, so Microsoft 365 is reachable but not yet loggable-into.
+proof alone does not establish. Reachability was verified against live
+servers on 2026-09-09: smtp.gmail.com:587 and smtp.office365.com:587 both
+complete the upgrade and the second EHLO.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/5[#5]
 
 |D-006
@@ -124,17 +125,24 @@ value (`STARTTLS`, the `AUTH` mechanism list including the Exchange `AUTH=`
 spelling, `SIZE`, `8BITMIME`), carried on the session `Diagnostic`, and an AUTH
 failure now names what the server advertised — so "wrong password" and
 "mechanism this client cannot speak" stop looking alike. *Choosing* a mechanism
-from that list is D-007 and is still open; this defect was the reading and the
+from that list is D-007, now also fixed; this defect was the reading and the
 reporting, both of which are done.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/9[#9]
 
 |D-007
 |`AUTH PLAIN` only. Microsoft 365 offers exactly `AUTH LOGIN XOAUTH2` on
-port 587 and has no listener on 465. Probed 2026-09-02. With D-005 and D-006
-fixed the action now connects, upgrades and reports the advertised list, so
-this is the last piece between it and Microsoft 365.
+port 587 and has no listener on 465. Probed 2026-09-02.
 |Medium
-|Open
+|Fixed on `main`; unreleased. The mechanism is now chosen from the parsed
+capability list rather than assumed: `PLAIN` when offered (one round trip, the
+longer-tested path), `LOGIN` otherwise, and a server advertising neither is
+refused *before any credential byte is written* — a mismatch is not something
+to guess at with a password. `XOAUTH2` is deliberately not implemented: it
+needs a token from an OAuth flow, which no repository secret can supply. On
+the STARTTLS path the choice is made from the *post-upgrade* advertisement,
+so an active attacker cannot steer mechanism selection by editing the
+cleartext greeting. The `LOGIN` challenge-response exchange sits outside the
+proven table by design — see "Scope of the proof" below.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/10[#10]
 
 |D-008
@@ -167,10 +175,21 @@ claim belongs in the defect register rather than only in the README.
 
 * *Universally quantified*: dot-stuffing (`stuffSafe` in `spec/src/Serialize.idr`)
   — a theorem over all inputs.
-* *Proved over the concrete table*: the protocol state machine's determinism,
-  termination and ordering. These are `Refl` proofs about the eight rows that
-  exist, so they are a very strong table lint rather than a statement about all
-  possible state machines. They would need restating if the table changed shape.
+* *Proved over the concrete tables*: the protocol state machine's determinism,
+  termination, ordering, and — since the STARTTLS table landed — that the
+  upgrade rows are actually *reached from the start state*, which a per-row
+  proof alone does not establish. These are `Refl` proofs about the rows that
+  exist (8 in the implicit table, 10 in the STARTTLS one), so they are a very
+  strong table lint rather than a statement about all possible state machines.
+  They would need restating if either table changed shape.
+* *Corpus only, no theorem*: the `AUTH LOGIN` challenge-response exchange. The
+  state machine has ONE `auth` row expecting `235`, and the two intermediate
+  `334` challenges are driven in Zig, outside the table. This is deliberate:
+  admitting `334` would either break the invariant that `354` is the sole
+  intermediate reply, or force one table per transport x mechanism pair. What
+  the table still owns is the part that decides the outcome — the terminal
+  reply is checked against `235` exactly as before. Mechanism selection and
+  the challenge loop are covered by tests, not by a theorem.
 * *Corpus only, no theorem*: header-value validation is covered by golden
   vectors. An injection vector outside the corpus is not excluded by proof.
 * *Not covered at all*: TLS (D-008), the network layer, and the installer.

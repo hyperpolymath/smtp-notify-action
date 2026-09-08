@@ -47,10 +47,22 @@ Pin a tag, or a commit SHA that is an ancestor of one.
   upgrade rows, and the STARTTLS table is proven to *reach* them from the
   start state. A row that is present but unreachable would have
   authenticated in the clear while every prior proof stayed green.
+* *`AUTH LOGIN`, and mechanism selection* (issue #10). The mechanism is chosen
+  from the advertised list instead of assumed: `PLAIN` where offered (one round
+  trip), `LOGIN` otherwise. On the STARTTLS path the choice is made from the
+  post-upgrade advertisement, so rewriting the cleartext greeting cannot steer
+  it. A server offering neither is refused *before any credential byte is
+  written*, naming what was on offer. `XOAUTH2` is not implemented and is not
+  planned — it needs an OAuth token, which a repository secret cannot supply.
+  The two `334` challenges are driven outside the proven table by design; the
+  terminal reply is still checked against it. See `KNOWN-DEFECTS.adoc`,
+  "Scope of the proof".
 
-Microsoft 365 is now reachable but still cannot be authenticated to: it
-offers only `AUTH LOGIN` and `XOAUTH2`, and this action still sends
-`AUTH PLAIN` (issue #10).
+*Microsoft 365 is now a supported provider* on port 587 with
+`secure: starttls`. Port 465 has no listener there and never will work. The
+STARTTLS handshake was verified against live `smtp.office365.com:587` and
+`smtp.gmail.com:587` on 2026-09-09; authentication is covered by tests rather
+than a live tenant, as no Microsoft 365 credential exists here.
 
 == v0.2.0 — 2026-09-03
 
