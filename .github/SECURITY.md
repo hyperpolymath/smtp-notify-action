@@ -24,7 +24,8 @@ defects instead of waiting to be asked about them.
 
 | Version | Supported |
 |---|---|
-| `v0.2.0` | Yes — current release |
+| `v0.3.0` | Yes — current release |
+| `v0.2.0` | No — superseded; implicit TLS only, no STARTTLS |
 | `v0.1.0` | No — superseded; `secure` fails open |
 | `main` | No — not a release; during a release window it names assets that are not published yet |
 

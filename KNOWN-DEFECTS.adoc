@@ -102,7 +102,7 @@ consuming minutes for a mail that was never sent.
 ordinary path for most providers. The action failed closed rather than falling
 back to plaintext, so this cost reachability, not confidentiality.
 |Medium
-|Fixed on `main`; unreleased. `secure: false`/`starttls` starts in the clear
+|Fixed on `main`; ships in v0.3.0. `secure: false`/`starttls` starts in the clear
 on the submission port and upgrades in place (RFC 3207), including the
 mandatory second EHLO. The upgrade is not optional: a server that does not
 advertise `STARTTLS` fails the step, and the guard runs *before* the command
@@ -120,7 +120,7 @@ complete the upgrade and the second EHLO.
 instead of reading what the server offers, so a server offering only other
 mechanisms failed at AUTH with no explanation of why.
 |Medium
-|Fixed on `main`; unreleased. The EHLO reply is parsed into a `Capabilities`
+|Fixed on `main`; ships in v0.3.0. The EHLO reply is parsed into a `Capabilities`
 value (`STARTTLS`, the `AUTH` mechanism list including the Exchange `AUTH=`
 spelling, `SIZE`, `8BITMIME`), carried on the session `Diagnostic`, and an AUTH
 failure now names what the server advertised — so "wrong password" and
@@ -133,7 +133,7 @@ reporting, both of which are done.
 |`AUTH PLAIN` only. Microsoft 365 offers exactly `AUTH LOGIN XOAUTH2` on
 port 587 and has no listener on 465. Probed 2026-09-02.
 |Medium
-|Fixed on `main`; unreleased. The mechanism is now chosen from the parsed
+|Fixed on `main`; ships in v0.3.0. The mechanism is now chosen from the parsed
 capability list rather than assumed: `PLAIN` when offered (one round trip, the
 longer-tested path), `LOGIN` otherwise, and a server advertising neither is
 refused *before any credential byte is written* — a mismatch is not something

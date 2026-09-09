@@ -12,7 +12,7 @@ The unit of release is the *action ref*: the tag or commit you pin determines bo
 
 toc::[]
 
-== Unreleased
+== v0.3.0 — 2026-09-09
 
 [IMPORTANT]
 ====
@@ -58,11 +58,12 @@ Pin a tag, or a commit SHA that is an ancestor of one.
   terminal reply is still checked against it. See `KNOWN-DEFECTS.adoc`,
   "Scope of the proof".
 
-*Microsoft 365 is now a supported provider* on port 587 with
-`secure: starttls`. Port 465 has no listener there and never will work. The
-STARTTLS handshake was verified against live `smtp.office365.com:587` and
-`smtp.gmail.com:587` on 2026-09-09; authentication is covered by tests rather
-than a live tenant, as no Microsoft 365 credential exists here.
+*Microsoft 365 and Google Workspace are reachable from this release* on port 587
+with `secure: starttls`. Port 465 has no listener at Microsoft 365 and never will
+work. The STARTTLS handshake is verified against both providers' live submission
+ports — `smtp.office365.com:587` and `smtp.gmail.com:587`, on 2026-09-09 —
+whereas authentication over STARTTLS is covered by tests rather than by a live
+send, because no Microsoft 365 credential was available.
 
 == v0.2.0 — 2026-09-03
 

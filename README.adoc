@@ -28,7 +28,7 @@ toc::[]
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.2.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.3.0
   with:
     server_address: ${{ secrets.SMTP_HOST }}
     server_port: 465
@@ -46,7 +46,7 @@ On the submission port, set `secure` to `starttls` and the port to 587:
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # newer than v0.2.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.3.0
   with:
     server_address: smtp.office365.com   # or smtp.gmail.com
     server_port: 587
@@ -59,13 +59,11 @@ On the submission port, set `secure` to `starttls` and the port to 587:
     body: '${{ github.actor }} pushed ${{ github.sha }}'
 ----
 
-IMPORTANT: STARTTLS is on `main` and is *not in v0.2.0*. v0.2.0 speaks implicit
-TLS only, so pinning it with `server_port: 587` will fail. Until the next tag is
-cut, the submission-port route needs a commit newer than v0.2.0. What has been
-verified against live servers is the *upgrade itself* — smtp.gmail.com:587 and
-smtp.office365.com:587 both complete the STARTTLS handshake and the mandatory
-second EHLO. Authentication on that route is covered by tests rather than by a
-live send; see link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] D-005 to D-007.
+IMPORTANT: What has been verified against live servers is the *upgrade itself* —
+smtp.gmail.com:587 and smtp.office365.com:587 both complete the STARTTLS
+handshake and the mandatory second EHLO. Authentication on that route is covered
+by tests rather than by a live send; see
+link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] D-005 to D-007.
 
 These nine input names match `dawidd6/action-send-mail` exactly:
 `server_address`, `server_port`, `secure`, `username`, `password`, `from`,

@@ -8,9 +8,10 @@ match `dawidd6/action-send-mail` exactly; fifteen are absent; and several shared
 names differ in default or in meaning. Read the drift section before switching a
 working workflow.
 
-NOTE: This guide describes *v0.2.0*. The `secure` input changed behaviour in
-that release: v0.1.0 treated any unrecognised value as plaintext, v0.2.0
-rejects it. Pin `@v0.2.0` or later, not `@v0.1.0`, or the behaviour described
+NOTE: This guide describes *v0.3.0*. The `secure` input changed behaviour in
+v0.2.0: v0.1.0 treated any unrecognised value as plaintext, v0.2.0 rejects it.
+v0.3.0 adds the STARTTLS submission-port route described below. Pin `@v0.3.0`,
+not `@v0.1.0`, or the behaviour described
 below will not be the behaviour you get.
 
 toc::[]
@@ -56,7 +57,7 @@ The migration rule follows from that:
 
 * If your dawidd6 step used `secure: true` on port 465, it ports across unchanged.
 * If it used `secure: false` on port 587, it ports across too — STARTTLS has
-  landed on `main` (unreleased).
+  landed: it ships in v0.3.0.
   The one behavioural difference is a server that does not advertise
   `STARTTLS` — dawidd6 would send in the clear, this action stops. Do not
   reach for `plaintext` if that happens; check the port first.
@@ -74,7 +75,7 @@ Probed 2026-09-02, re-probed live on 2026-09-09:
 * `smtp.office365.com:465` has no listener at all, so the implicit-TLS path
   cannot connect and no setting works around that.
 
-All three pieces are now on `main` (unreleased): STARTTLS on 587, EHLO
+All three pieces ship in v0.3.0: STARTTLS on 587, EHLO
 capability parsing
 (https://github.com/hyperpolymath/smtp-notify-action/issues/9[issue #9]) and
 mechanism selection including `AUTH LOGIN`
@@ -197,7 +198,7 @@ failure is now legible, but it is still a failure.
 .After
 [source,yaml]
 ----
-- uses: hyperpolymath/smtp-notify-action@v0.2.0
+- uses: hyperpolymath/smtp-notify-action@v0.3.0
   with:
     server_address: smtp.example.org
     server_port: 465

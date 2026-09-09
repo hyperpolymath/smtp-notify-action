@@ -83,3 +83,8 @@ it go red; a check with no recorded failure is decoration until proven otherwise
 
 Ordinary defects: open an issue. Anything that could expose credentials or mail
 contents: use private vulnerability reporting, per `.github/SECURITY.md`.
+
+Redact before you paste. A log excerpt in an issue is public. Actions masks
+values that came from `secrets.*`, so those arrive as `***`, but a password
+hardcoded into your own workflow is not masked and will appear in full. Replace
+addresses, hostnames and any `AUTH` line with placeholders before pasting.
