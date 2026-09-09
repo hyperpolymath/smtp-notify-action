@@ -17,6 +17,8 @@ import Smtp.Serialize
 phaseName : Phase -> String
 phaseName PConnect  = "connect"
 phaseName PEhlo     = "ehlo"
+phaseName PStartTls = "starttls"
+phaseName PEhloTls  = "ehlo_tls"
 phaseName PAuth     = "auth"
 phaseName PMailFrom = "mail_from"
 phaseName PRcptTo   = "rcpt_to"
@@ -28,7 +30,8 @@ phaseName PDone     = "done"
 actionName : Action -> String
 actionName ANone      = "none"
 actionName AEhlo      = "ehlo"
-actionName AAuthPlain = "auth_plain"
+actionName AStartTls  = "starttls"
+actionName AAuth      = "auth"
 actionName AMailFrom  = "mail_from"
 actionName ARcptTo    = "rcpt_to"
 actionName AData      = "data"
@@ -74,9 +77,9 @@ output =
   , "// fresh generation and fails on drift."
   , "// SPDX-License-Identifier: MPL-2.0"
   , ""
-  , "pub const Phase = enum(u8) { connect, ehlo, auth, mail_from, rcpt_to, data, payload, quit, done };"
+  , "pub const Phase = enum(u8) { connect, ehlo, starttls, ehlo_tls, auth, mail_from, rcpt_to, data, payload, quit, done };"
   , ""
-  , "pub const Action = enum(u8) { none, ehlo, auth_plain, mail_from, rcpt_to, data, payload, quit };"
+  , "pub const Action = enum(u8) { none, ehlo, starttls, auth, mail_from, rcpt_to, data, payload, quit };"
   , ""
   , "pub const Step = struct {"
   , "    phase: Phase,"
@@ -89,11 +92,28 @@ output =
   , "    repeats: bool,"
   , "};"
   , ""
-  , "pub const script = [_]Step{"
+  , "/// Session over an already-encrypted or deliberately plain stream."
+  , "/// These rows are the contract that shipped in v0.2.0."
+  , "pub const script_implicit = [_]Step{"
   ]
-  ++ map stepLine script
+  ++ map stepLine scriptImplicit
   ++
   [ "};"
+  , ""
+  , "/// Session that begins in cleartext on the submission port and"
+  , "/// upgrades in place (RFC 3207). The second EHLO is mandatory: the"
+  , "/// server may advertise differently once the session is encrypted."
+  , "pub const script_starttls = [_]Step{"
+  ]
+  ++ map stepLine scriptStartTls
+  ++
+  [ "};"
+  , ""
+  , "/// The table for a transport. Selecting by value rather than exporting"
+  , "/// one `script` keeps the caller from silently walking the wrong shape."
+  , "pub fn scriptFor(starttls: bool) []const Step {"
+  , "    return if (starttls) &script_starttls else &script_implicit;"
+  , "}"
   , ""
   , "pub const StuffVector = struct { input: []const u8, expected: []const u8 };"
   , ""

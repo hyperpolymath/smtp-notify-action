@@ -60,8 +60,13 @@ Vendoring also means an upstream fix does **not** reach you automatically.
   regression, and this is a deliberate incompatibility.
 - **Transport selection is fail-closed.** An unrecognised `secure` value is
   rejected outright rather than falling back to plaintext. `secure: false`
-  (STARTTLS) is accepted but not yet implemented, so it *fails* rather than
-  silently sending in the clear. Plaintext requires typing `plaintext`.
+  (STARTTLS) upgrades in place per RFC 3207 and *fails* if the server does not
+  advertise `STARTTLS`, rather than silently sending in the clear. Plaintext
+  requires typing `plaintext`.
+- **The post-upgrade EHLO is the one that counts.** RFC 3207 §4.2 requires a
+  second `EHLO` after a STARTTLS upgrade, and the capability list it returns
+  *replaces* the cleartext one. The cleartext list is unauthenticated — an
+  active attacker can edit it — so it is never used to decide anything.
 - **The password never reaches `argv`.** It is passed through the environment, so
   it cannot leak into a process listing on a shared runner.
 - **The binary is pinned by SHA-256** in `action.yml`, and `release.yml` refuses
@@ -77,9 +82,19 @@ depend on the action.
 
 - **Linux only.** The released binaries are static `linux-musl` builds. The action
   gates on `uname -s` and fails with a clear message on Windows and macOS runners.
-- **AUTH PLAIN only.** `AUTH LOGIN` is not implemented (issue #10) and EHLO
-  capabilities are not parsed (issue #9), so mechanism selection is blind. This is
-  why Microsoft 365 cannot currently be authenticated to.
+- **Password mechanisms only: PLAIN and LOGIN.** The mechanism is chosen from the
+  parsed EHLO capability list (issue #9) rather than assumed, and on the STARTTLS
+  path from the *post-upgrade* list, so an active attacker cannot steer mechanism
+  selection by rewriting the cleartext greeting. A server advertising neither
+  mechanism is refused before any credential byte is written — the failure names
+  what was on offer instead of putting a password on the wire to be rejected.
+  `XOAUTH2` is deliberately not implemented: it requires a token from an OAuth
+  flow, which a repository secret cannot supply.
+- **The AUTH LOGIN exchange is outside the proven state machine.** The table holds
+  one `auth` row expecting `235`; the two intermediate `334` challenges are driven
+  in Zig and covered by tests, not by a theorem. The reply that decides success or
+  failure is still checked against the table. See `KNOWN-DEFECTS.adoc`, "Scope of
+  the proof".
 - **No per-operation network deadlines.** A whole-run watchdog bounds the entire
   run instead. It is a deadline, not an idle timer: a server that dribbles bytes
   slowly will run to the deadline rather than being cut off at the first stall.

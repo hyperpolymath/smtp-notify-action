@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
 name: 'SMTP Notify'
 description: >-
-  Send a plain-text notification email over implicit TLS (SMTPS) from a
-  workflow. Node-free: one static Zig binary with zero dependencies, whose
-  SMTP session is formally specified in Idris2 and machine-checked.
-  Implements nine dawidd6/action-send-mail input names; it is a migration
-  target, not a full replacement.
+  Send a plain-text notification email from a workflow over SMTPS (implicit
+  TLS, port 465) or STARTTLS on the submission port (587), which is what
+  Google Workspace expects and Microsoft 365 requires. Node-free: one static Zig
+  binary with zero dependencies, whose SMTP session is formally specified in
+  Idris2 and machine-checked. Implements nine dawidd6/action-send-mail input
+  names; it is a migration target, not a full replacement.
 author: 'hyperpolymath'
 branding:
   icon: 'mail'
@@ -23,23 +24,24 @@ inputs:
     description: >-
       Transport selection, fail-closed. "true" (default) or "implicit" =
       implicit TLS from the first byte (SMTPS, normally port 465). "false" or
-      "starttls" = STARTTLS on a plain connection, which is accepted but NOT
-      YET IMPLEMENTED, so the step fails with a clear message rather than
-      silently falling back to plaintext (issue #5). "plaintext" = no TLS at
-      all, which sends the password base64-encoded in the clear; use it only
-      against a containerized test sink. Any other value is rejected outright.
-      Note the difference from dawidd6/action-send-mail, where "false" means
-      "STARTTLS when the server offers it": here it fails instead of
-      downgrading, because an unrecognised value used to mean plaintext.
+      "starttls" = start in the clear and upgrade with STARTTLS (RFC 3207,
+      normally port 587); the upgrade is MANDATORY, so a server that does not
+      advertise STARTTLS fails the step rather than being talked to in the
+      clear. "plaintext" = no TLS at all, which sends the password
+      base64-encoded in the clear; use it only against a containerized test
+      sink. Any other value is rejected outright. Note the difference from
+      dawidd6/action-send-mail, where "false" means "STARTTLS when the server
+      offers it": here a server that does not offer it is an error, not a
+      downgrade.
     required: false
     default: 'true'
   username:
-    description: 'AUTH PLAIN username'
+    description: 'SMTP username (AUTH PLAIN or AUTH LOGIN, chosen from what the server offers)'
     required: false
     default: ''
   password:
     description: >-
-      AUTH PLAIN password. Reaches the binary via the environment, never argv,
+      SMTP password. Reaches the binary via the environment, never argv,
       so it cannot leak into process listings.
     required: false
     default: ''

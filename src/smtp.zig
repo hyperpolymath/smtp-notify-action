@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Table-driven SMTP client session.
 //!
-//! The `script` table in src/generated/smtp_fsm.zig — generated from the
-//! proven Idris2 spec — is the ONLY protocol authority here: this module
-//! walks it phase by phase and refuses any reply the current row does not
-//! list. It talks to generic `std.Io.Reader`/`std.Io.Writer`, so the unit
+//! The script tables in src/generated/smtp_fsm.zig — generated from the
+//! proven Idris2 spec — are the ONLY protocol authority here: this module
+//! walks one phase by phase and refuses any reply the current row does
+//! not list. There are two, chosen by `Config.use_starttls`: a session
+//! over an already-encrypted stream, and one that begins in cleartext
+//! on the submission port and upgrades in place (RFC 3207). Each is
+//! proven separately, including that the upgrade is on the walked path.
+//! It talks to generic `std.Io.Reader`/`std.Io.Writer`, so the unit
 //! tests below drive whole sessions against scripted in-memory replies with
 //! no network involved; main.zig supplies TLS- or TCP-backed streams.
 
@@ -27,6 +31,13 @@ pub const Config = struct {
     /// Greeting + EHLO + QUIT only — proves reachability and TLS without
     /// authenticating or sending mail.
     handshake_only: bool = false,
+    /// Begin in cleartext and issue STARTTLS after the first EHLO
+    /// (RFC 3207), rather than expecting an already-encrypted stream.
+    /// Selects the other proven table; requires `upgrader`.
+    use_starttls: bool = false,
+    /// Performs the TLS handshake once the server accepts STARTTLS.
+    /// Required when `use_starttls` is set, ignored otherwise.
+    upgrader: ?Upgrader = null,
 };
 
 pub const SessionError = error{
@@ -37,6 +48,10 @@ pub const SessionError = error{
     NoRecipients,
     ReplyMalformed,
     AuthTooLong,
+    StartTlsNotOffered, // asked to upgrade, but EHLO never advertised STARTTLS
+    StartTlsUnconfigured, // use_starttls set with no upgrader to call
+    StartTlsUpgradeFailed, // the server said 220 and the handshake still failed
+    AuthMechanismUnsupported, // server named its mechanisms; none is one we speak
 };
 
 pub const Error = SessionError || std.Io.Reader.DelimiterError || std.Io.Writer.Error;
@@ -66,6 +81,120 @@ pub const Reply = struct {
     truncated: bool = false,
 };
 
+/// Cap on the retained AUTH mechanism list. Long enough for every mechanism
+/// list observed from Gmail, Microsoft 365 and Postfix. A longer one is
+/// truncated for the *log* only — the booleans below are set from the whole
+/// line, so a truncated diagnostic can never change a decision.
+const auth_raw_max = 128;
+
+/// What the server said it can do, parsed from the EHLO reply (#9, D-006).
+///
+/// RFC 5321 4.1.1.1: EHLO keywords are case-insensitive, so every match here
+/// folds case. The reply's first line is the server's greeting and domain,
+/// never a capability, so it is skipped.
+///
+/// This exists so the client can *choose* rather than assume: refuse STARTTLS
+/// on a server that never offered it, pick an AUTH mechanism the server
+/// actually supports, and — when something fails anyway — say what was on
+/// offer instead of only what failed.
+pub const Capabilities = struct {
+    starttls: bool = false,
+    auth_plain: bool = false,
+    auth_login: bool = false,
+    auth_xoauth2: bool = false,
+    eight_bit_mime: bool = false,
+    /// The SIZE parameter's value, when the server gave a parseable one.
+    size: ?u64 = null,
+    /// The AUTH line's mechanism list, verbatim and bounded, for diagnostics.
+    /// Server bytes only — no credential can reach it.
+    auth_raw: [auth_raw_max]u8 = undefined,
+    auth_raw_len: usize = 0,
+
+    /// The mechanisms the server named, as it spelled them. Empty when the
+    /// server advertised no AUTH line at all.
+    pub fn authMechanisms(c: *const Capabilities) []const u8 {
+        return c.auth_raw[0..c.auth_raw_len];
+    }
+
+    /// True when at least one mechanism this client can drive was offered.
+    pub fn anyKnownAuth(c: *const Capabilities) bool {
+        return c.auth_plain or c.auth_login or c.auth_xoauth2;
+    }
+};
+
+/// Parse an EHLO reply's accumulated text into `Capabilities`.
+///
+/// `text` is exactly what `readReply` produced: every line, '\n'-separated,
+/// with the three-digit code and its '-'/' ' separator already stripped. No
+/// allocation, no I/O — this is a pure function over bytes already read, and
+/// is tested as one.
+pub fn parseCapabilities(text: []const u8) Capabilities {
+    var caps: Capabilities = .{};
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = lines.next(); // greeting line: the domain, not a capability
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        // The keyword runs to the first space or '='. Exchange has been seen
+        // to spell the mechanism list "AUTH=LOGIN" as well as "AUTH LOGIN",
+        // and a client that reads only the second form silently concludes
+        // the server offers no authentication at all.
+        const kw_end = std.mem.indexOfAny(u8, line, " =") orelse line.len;
+        const keyword = line[0..kw_end];
+        const rest = std.mem.trim(u8, line[@min(kw_end + 1, line.len)..], " \t");
+        if (std.ascii.eqlIgnoreCase(keyword, "STARTTLS")) {
+            caps.starttls = true;
+        } else if (std.ascii.eqlIgnoreCase(keyword, "8BITMIME")) {
+            caps.eight_bit_mime = true;
+        } else if (std.ascii.eqlIgnoreCase(keyword, "SIZE")) {
+            // An unparseable SIZE is "unstated", not zero: a zero would read
+            // as "this server accepts no message at all".
+            caps.size = std.fmt.parseInt(u64, rest, 10) catch null;
+        } else if (std.ascii.eqlIgnoreCase(keyword, "AUTH")) {
+            const n = @min(rest.len, caps.auth_raw.len);
+            @memcpy(caps.auth_raw[0..n], rest[0..n]);
+            caps.auth_raw_len = n;
+            var mechs = std.mem.tokenizeAny(u8, rest, " \t=");
+            while (mechs.next()) |m| {
+                if (std.ascii.eqlIgnoreCase(m, "PLAIN")) {
+                    caps.auth_plain = true;
+                } else if (std.ascii.eqlIgnoreCase(m, "LOGIN")) {
+                    caps.auth_login = true;
+                } else if (std.ascii.eqlIgnoreCase(m, "XOAUTH2")) {
+                    caps.auth_xoauth2 = true;
+                }
+            }
+        }
+    }
+    return caps;
+}
+
+/// The SASL mechanisms this client can drive. XOAUTH2 is deliberately absent:
+/// it needs a token issued by an OAuth flow, not a password, so offering it
+/// here would be a field that could never be filled from a repository secret.
+pub const Mechanism = enum { plain, login };
+
+/// Pick a mechanism from what the server advertised.
+///
+/// The choice is made from `caps`, which is refreshed by BOTH EHLOs — after a
+/// STARTTLS upgrade the post-encryption list is the only one that has not
+/// passed through an attacker's hands (RFC 3207 §4.2).
+///
+/// Returns null when the server named its mechanisms and none of them is one
+/// we speak. The caller must then fail BEFORE writing a credential: a
+/// mechanism mismatch is not a thing to guess at.
+fn chooseMechanism(caps: *const Capabilities) ?Mechanism {
+    // No AUTH line at all. Try PLAIN: this is exactly what shipped on the
+    // implicit-TLS path in v0.2.0, and refusing here would break every 465
+    // user whose server simply does not enumerate its mechanisms.
+    if (caps.auth_raw_len == 0) return .plain;
+    // PLAIN first when both are offered — one round trip instead of three,
+    // and it is the path with the longer test history.
+    if (caps.auth_plain) return .plain;
+    if (caps.auth_login) return .login;
+    return null;
+}
+
 /// Carries the last reply out of a failed session so the caller can print the
 /// server's explanation. Only ever holds bytes the *server* sent — no
 /// credential can reach it.
@@ -78,17 +207,29 @@ pub const Diagnostic = struct {
     len: usize = 0,
     truncated: bool = false,
 
+    /// What the server advertised at EHLO. Set when the EHLO reply is read,
+    /// so a later AUTH failure can name what was actually on offer instead of
+    /// leaving the operator to guess (D-006).
+    caps: Capabilities = .{},
+
+    /// Which mechanism this client actually chose from `caps`. Null when AUTH
+    /// was never reached, or when nothing on offer could be driven.
+    mechanism: ?Mechanism = null,
+
     pub fn text(d: *const Diagnostic) []const u8 {
         return d.buf[0..d.len];
     }
 
-    fn record(d: *Diagnostic, phase: fsm.Phase, reply: Reply) void {
+    fn record(d: *Diagnostic, phase: fsm.Phase, reply: Reply, caps: Capabilities) void {
         d.phase = phase;
         d.code = reply.code;
         const n = @min(reply.text.len, d.buf.len);
         @memcpy(d.buf[0..n], reply.text[0..n]);
         d.len = n;
         d.truncated = reply.truncated or n < reply.text.len;
+        // The caller owns the parse: both EHLOs refresh it, and after
+        // an upgrade the post-encryption list is the only honest one.
+        d.caps = caps;
     }
 };
 
@@ -107,54 +248,119 @@ pub const Wire = struct {
     }
 };
 
-/// Walk the generated script from .connect to .done, sending each row's
-/// action and demanding a listed reply code before advancing.
+/// Turns the current stream into an encrypted one, in place, after the server
+/// has accepted STARTTLS.
+///
+/// The session driver deliberately knows nothing about TLS — it talks to
+/// generic readers and writers so the tests below can drive whole sessions
+/// against in-memory scripts. The upgrade is therefore a callback the caller
+/// supplies: main.zig hands over one backed by `src/tls/Client.zig`, and a
+/// test hands over one that simply swaps in a different in-memory stream,
+/// which is enough to prove the driver really does switch streams.
+pub const Upgrader = struct {
+    ctx: *anyopaque,
+    upgradeFn: *const fn (ctx: *anyopaque) anyerror!Wire,
+
+    pub fn upgrade(u: Upgrader) anyerror!Wire {
+        return u.upgradeFn(u.ctx);
+    }
+};
+
+/// Walk the generated script for this transport from .connect to .done,
+/// sending each row's action and demanding a listed reply code before
+/// advancing.
 pub fn runSession(cfg: Config, wire: Wire) Error!void {
     return runSessionDiag(cfg, wire, null);
 }
 
 /// As `runSession`, but records the last reply read into `diag` so a failure
 /// can be reported with the server's own explanation rather than a bare code.
-pub fn runSessionDiag(cfg: Config, wire: Wire, diag: ?*Diagnostic) Error!void {
-    const r = wire.r;
-    const w = wire.w;
+pub fn runSessionDiag(cfg: Config, wire_in: Wire, diag: ?*Diagnostic) Error!void {
+    // Mutable: a STARTTLS session replaces this with the encrypted stream
+    // partway through, and everything after the upgrade — including the
+    // courtesy QUIT below — must ride on the new one.
+    var wire = wire_in;
     if (!message.headerValueOk(cfg.subject)) return error.HeaderInjection;
     if (!message.headerValueOk(cfg.from)) return error.HeaderInjection;
     for (cfg.recipients) |rcpt| {
         if (!message.headerValueOk(rcpt)) return error.HeaderInjection;
     }
     if (!cfg.handshake_only and cfg.recipients.len == 0) return error.NoRecipients;
+    if (cfg.use_starttls and cfg.upgrader == null) return error.StartTlsUnconfigured;
 
     // Best-effort abort courtesy: on any failure mid-session, try to QUIT so
     // the server does not hold a half-open transaction.
     errdefer {
-        w.writeAll("QUIT\r\n") catch {};
+        wire.w.writeAll("QUIT\r\n") catch {};
         wire.flush() catch {};
     }
 
+    // Which of the two proven tables this session walks. Both are generated
+    // from the same spec and each is proven separately; nothing here may
+    // reach across from one shape to the other.
+    const table = fsm.scriptFor(cfg.use_starttls);
+
     var phase: fsm.Phase = .connect;
     var rcpt_index: usize = 0;
+    var caps: Capabilities = .{};
     var reply_buf: [reply_text_max]u8 = undefined;
     while (phase != .done) {
-        // Coverage of every non-terminal phase is proven in the spec
+        // Coverage of every phase a table uses is proven in the spec
         // (deterministicCoverage), so a missing row is unreachable.
-        const step = lookupStep(phase) orelse return error.ProtocolError;
-        try sendAction(cfg, step.send, rcpt_index, w);
+        const step = lookupStep(table, phase) orelse return error.ProtocolError;
+
+        // RFC 3207 §4: do not issue STARTTLS to a server that never offered
+        // it. Checked BEFORE the command goes out, because the alternative
+        // to upgrading is not "carry on unencrypted" — it is to stop. This
+        // is the same fail-closed rule as D-001; a downgrade that happens
+        // silently is the whole defect.
+        if (step.phase == .starttls and !caps.starttls) return error.StartTlsNotOffered;
+
+        // AUTH is the one action that is not a single write: LOGIN carries two
+        // `334` challenges that runAuth consumes. It leaves the TERMINAL reply
+        // unread, so the line below still decides the outcome from the table.
+        if (step.send == .auth) {
+            try runAuth(cfg, &wire, &caps, &reply_buf, diag);
+        } else {
+            try sendAction(cfg, step.send, rcpt_index, wire.w);
+        }
         try wire.flush();
-        const reply = try readReply(r, &reply_buf);
-        if (diag) |d| d.record(phase, reply);
+        const reply = try readReply(wire.r, &reply_buf);
+
+        // Both EHLOs refresh the capability set. RFC 3207 §4.2 requires the
+        // post-upgrade list to REPLACE the cleartext one — a server may
+        // advertise different mechanisms once the session is encrypted, and
+        // trusting the unprotected greeting is trusting an attacker's edit
+        // of it.
+        if (step.phase == .ehlo or step.phase == .ehlo_tls) {
+            caps = parseCapabilities(reply.text);
+        }
+        if (diag) |d| d.record(phase, reply, caps);
         try checkReply(step, reply.code);
+
+        // The handshake itself: the server has said 220 and is waiting for a
+        // TLS ClientHello, not for another SMTP verb.
+        if (step.phase == .starttls) {
+            const up = cfg.upgrader orelse return error.StartTlsUnconfigured;
+            wire = up.upgrade() catch return error.StartTlsUpgradeFailed;
+        }
+
         if (step.repeats) {
             rcpt_index += 1;
             if (rcpt_index < cfg.recipients.len) continue; // same row, next recipient
         }
-        // handshake_only: once EHLO succeeded, skip straight to QUIT.
+        // handshake_only stops before authenticating. `step.next == .auth`
+        // says exactly that, and says it in BOTH tables: the implicit table
+        // reaches .auth from .ehlo, the STARTTLS table from .ehlo_tls. So a
+        // handshake-only probe on 587 still performs the upgrade and the
+        // second EHLO — which is the point, since a reachability probe that
+        // skipped the upgrade would prove nothing about TLS.
         phase = if (cfg.handshake_only and step.next == .auth) .quit else step.next;
     }
 }
 
-fn lookupStep(phase: fsm.Phase) ?fsm.Step {
-    for (fsm.script) |s| {
+fn lookupStep(table: []const fsm.Step, phase: fsm.Phase) ?fsm.Step {
+    for (table) |s| {
         if (s.phase == phase) return s;
     }
     return null;
@@ -164,7 +370,11 @@ fn sendAction(cfg: Config, action: fsm.Action, rcpt_index: usize, w: *std.Io.Wri
     switch (action) {
         .none => {}, // server speaks first (greeting)
         .ehlo => try w.print("EHLO {s}\r\n", .{cfg.ehlo_domain}),
-        .auth_plain => try writeAuthPlain(w, cfg.username, cfg.password),
+        .starttls => try w.writeAll("STARTTLS\r\n"),
+        // AUTH is not one write — LOGIN is a challenge-response exchange, so
+        // `runAuth` owns it and the driver never routes it here. A reply that
+        // somehow arrives at this arm is a table the code does not match.
+        .auth => return error.ProtocolError,
         .mail_from => try w.print("MAIL FROM:<{s}>\r\n", .{angleAddr(cfg.from)}),
         .rcpt_to => try w.print("RCPT TO:<{s}>\r\n", .{angleAddr(cfg.recipients[rcpt_index])}),
         .data => try w.writeAll("DATA\r\n"),
@@ -248,6 +458,74 @@ fn writeAuthPlain(w: *std.Io.Writer, username: []const u8, password: []const u8)
     @memcpy(plain_buf[2 + username.len ..][0..password.len], password);
     const encoded = std.base64.standard.Encoder.encode(&b64_buf, plain_buf[0..needed]);
     try w.print("AUTH PLAIN {s}\r\n", .{encoded});
+}
+
+/// Drive the AUTH exchange for the mechanism the server actually offers.
+///
+/// PLAIN is one write and the driver reads the outcome, exactly as before.
+/// LOGIN (RFC 4954) is three writes with two `334` challenges in between,
+/// and those challenges are consumed HERE, deliberately off the proven table:
+/// admitting `334` to the state machine would either break the invariant that
+/// `354` is its sole intermediate reply, or force one table per transport x
+/// mechanism pair. The exchange is corpus-tested, not proved — see
+/// KNOWN-DEFECTS.adoc, "Scope of the proof".
+///
+/// The TERMINAL reply is not read here. It is left for the driver to check
+/// against the row's `expect` list, so the thing that decides success or
+/// failure stays on the proven path in both mechanisms.
+fn runAuth(
+    cfg: Config,
+    wire: *Wire,
+    caps: *const Capabilities,
+    buf: []u8,
+    diag: ?*Diagnostic,
+) Error!void {
+    // Fail before a single credential byte is written. A server advertising
+    // only XOAUTH2 needs a token, not a retry with the same password, and
+    // guessing PLAIN at it would put the password on the wire for nothing.
+    const mech = chooseMechanism(caps) orelse return error.AuthMechanismUnsupported;
+    if (diag) |d| d.mechanism = mech;
+
+    switch (mech) {
+        .plain => try writeAuthPlain(wire.w, cfg.username, cfg.password),
+        .login => {
+            try wire.w.writeAll("AUTH LOGIN\r\n");
+            try wire.flush();
+            try expectChallenge(wire, buf, diag);
+
+            try writeBase64Line(wire.w, cfg.username);
+            try wire.flush();
+            try expectChallenge(wire, buf, diag);
+
+            try writeBase64Line(wire.w, cfg.password);
+        },
+    }
+}
+
+/// Read one `334` challenge. The challenge TEXT is ignored: RFC 4954 leaves it
+/// server-defined ("Username:" in practice, but nothing may depend on that).
+///
+/// A non-334 here is the interesting case — Microsoft 365 rejects a bad
+/// username at the FIRST challenge, so this is where that failure surfaces.
+/// It is recorded on the diagnostic before the error propagates, or the
+/// operator gets a bare error class for the one reply that explains it.
+fn expectChallenge(wire: *Wire, buf: []u8, diag: ?*Diagnostic) Error!void {
+    const reply = try readReply(wire.r, buf);
+    if (diag) |d| d.record(.auth, reply, d.caps);
+    if (reply.code == 334) return;
+    if (reply.code >= 400 and reply.code < 500) return error.TransientFailure;
+    if (reply.code >= 500 and reply.code < 600) return error.PermanentFailure;
+    return error.ProtocolError;
+}
+
+/// One base64 line of an AUTH LOGIN exchange. Bounded by the same limit as
+/// AUTH PLAIN so a long credential fails loudly rather than truncating into
+/// a subtly wrong one.
+fn writeBase64Line(w: *std.Io.Writer, secret: []const u8) Error!void {
+    var b64_buf: [684]u8 = undefined; // ceil(512 / 3) * 4
+    if (secret.len > 512) return error.AuthTooLong;
+    const encoded = std.base64.standard.Encoder.encode(&b64_buf, secret);
+    try w.print("{s}\r\n", .{encoded});
 }
 
 /// RFC 5322 headers + dot-stuffed body + terminating "." line.
@@ -490,4 +768,463 @@ test "runSessionDiag carries the failing reply out to the caller" {
     try std.testing.expectEqual(fsm.Phase.auth, diag.phase);
     try std.testing.expectEqual(@as(u16, 535), diag.code);
     try std.testing.expectEqualStrings("5.7.8 Username and Password not accepted", diag.text());
+}
+
+test "parseCapabilities reads a real multi-line EHLO reply" {
+    // Exactly the shape readReply produces: greeting line first, then one
+    // capability per line, code and separator already stripped.
+    const caps = parseCapabilities(
+        "mail.example.org\nPIPELINING\nSIZE 35882577\n8BITMIME\nSTARTTLS\nAUTH LOGIN PLAIN XOAUTH2",
+    );
+    try std.testing.expect(caps.starttls);
+    try std.testing.expect(caps.eight_bit_mime);
+    try std.testing.expect(caps.auth_plain);
+    try std.testing.expect(caps.auth_login);
+    try std.testing.expect(caps.auth_xoauth2);
+    try std.testing.expectEqual(@as(?u64, 35882577), caps.size);
+    try std.testing.expectEqualStrings("LOGIN PLAIN XOAUTH2", caps.authMechanisms());
+}
+
+test "parseCapabilities: the greeting line is not a capability" {
+    // A server whose hostname happens to contain a keyword must not be read
+    // as advertising it. This is why the first line is skipped by position
+    // rather than by pattern.
+    const caps = parseCapabilities("starttls.example.org\nPIPELINING");
+    try std.testing.expect(!caps.starttls);
+}
+
+test "parseCapabilities: a single-line 250 advertises nothing" {
+    const caps = parseCapabilities("mail.example.org");
+    try std.testing.expect(!caps.starttls);
+    try std.testing.expect(!caps.anyKnownAuth());
+    try std.testing.expectEqualStrings("", caps.authMechanisms());
+    try std.testing.expectEqual(@as(?u64, null), caps.size);
+}
+
+test "parseCapabilities folds case, as RFC 5321 requires" {
+    const caps = parseCapabilities("mail.example.org\nstarttls\nauth login");
+    try std.testing.expect(caps.starttls);
+    try std.testing.expect(caps.auth_login);
+    try std.testing.expect(!caps.auth_plain);
+}
+
+test "parseCapabilities reads the Exchange 'AUTH=LOGIN' spelling" {
+    // Reading only "AUTH LOGIN" makes a server that offers authentication
+    // look like one that offers none — a silent, misdirected failure.
+    const caps = parseCapabilities("mail.example.org\nAUTH=LOGIN");
+    try std.testing.expect(caps.auth_login);
+    try std.testing.expect(caps.anyKnownAuth());
+}
+
+test "parseCapabilities: LOGIN-only server is distinguishable from PLAIN-only" {
+    const login_only = parseCapabilities("mx.example.net\nSTARTTLS\nAUTH LOGIN");
+    try std.testing.expect(login_only.auth_login);
+    try std.testing.expect(!login_only.auth_plain);
+
+    const plain_only = parseCapabilities("mx.example.net\nSTARTTLS\nAUTH PLAIN");
+    try std.testing.expect(plain_only.auth_plain);
+    try std.testing.expect(!plain_only.auth_login);
+}
+
+test "parseCapabilities: an unparseable SIZE is unstated, not zero" {
+    // Zero would read as "this server accepts no message at all".
+    const caps = parseCapabilities("mail.example.org\nSIZE unlimited");
+    try std.testing.expectEqual(@as(?u64, null), caps.size);
+}
+
+test "parseCapabilities: an over-long AUTH list truncates the log, not the decision" {
+    var line: [auth_raw_max + 64]u8 = undefined;
+    @memset(&line, 'X');
+    var buf: [auth_raw_max + 128]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "mail.example.org\nAUTH PLAIN {s}", .{line});
+    const caps = parseCapabilities(text);
+    try std.testing.expect(caps.auth_plain); // decision unaffected
+    try std.testing.expectEqual(auth_raw_max, caps.authMechanisms().len);
+}
+
+test "a session records the server's capabilities, not only its failures" {
+    // The greeting advertises STARTTLS and LOGIN; the session then fails at
+    // AUTH. The diagnostic must carry both facts, because "535" alone does
+    // not tell an operator that they asked for a mechanism on offer.
+    var diag: Diagnostic = .{};
+    var reader = std.Io.Reader.fixed(
+        "220 mx.example.net ESMTP\r\n" ++
+            "250-mx.example.net\r\n250-STARTTLS\r\n250 AUTH LOGIN XOAUTH2\r\n" ++
+            "535 5.7.8 Authentication unsuccessful\r\n",
+    );
+    var out: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    const cfg: Config = .{
+        .ehlo_domain = "github-actions",
+        .username = "u",
+        .password = "p",
+        .from = "Bot <bot@example.org>",
+        .recipients = &.{"to@example.org"},
+        .subject = "s",
+        .body = "b",
+        .date_epoch_seconds = 0,
+    };
+    try std.testing.expectError(
+        error.PermanentFailure,
+        runSessionDiag(cfg, .{ .r = &reader, .w = &writer }, &diag),
+    );
+    try std.testing.expectEqual(@as(u16, 535), diag.code);
+    try std.testing.expect(diag.caps.starttls);
+    try std.testing.expect(diag.caps.auth_login);
+    try std.testing.expect(!diag.caps.auth_plain);
+    try std.testing.expectEqualStrings("LOGIN XOAUTH2", diag.caps.authMechanisms());
+}
+
+/// Swaps in a *different* pair of in-memory streams when the driver calls
+/// for the upgrade. Using different streams rather than the same ones is the
+/// whole point: if the driver forgot to replace its wire, the post-upgrade
+/// dialogue would be read from — and written to — the cleartext pair, and
+/// every assertion below would fail.
+const TestUpgrade = struct {
+    r: *std.Io.Reader,
+    w: *std.Io.Writer,
+    calls: usize = 0,
+
+    fn upgrade(ctx: *anyopaque) anyerror!Wire {
+        const self: *TestUpgrade = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        return .{ .r = self.r, .w = self.w };
+    }
+
+    fn upgrader(self: *TestUpgrade) Upgrader {
+        return .{ .ctx = self, .upgradeFn = TestUpgrade.upgrade };
+    }
+};
+
+test "STARTTLS: the session moves onto the upgraded stream and stays there" {
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n" ++
+            "220 2.0.0 Ready to start TLS\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed(
+        "250-mail.example.org\r\n250 AUTH PLAIN LOGIN\r\n" ++
+            "235 2.7.0 Accepted\r\n" ++ // AUTH
+            "250 2.1.0 Ok\r\n" ++ // MAIL FROM
+            "250 2.1.5 Ok\r\n250 2.1.5 Ok\r\n" ++ // two RCPT TO
+            "354 End data with <CR><LF>.<CR><LF>\r\n" ++
+            "250 2.0.0 Ok: queued\r\n" ++
+            "221 2.0.0 Bye\r\n",
+    );
+    var tls_buf: [8192]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+
+    var diag: Diagnostic = .{};
+    try runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, &diag);
+
+    try std.testing.expectEqual(@as(usize, 1), up.calls);
+
+    // Cleartext: EHLO and STARTTLS, and nothing that carries a secret.
+    const clear = clear_buf[0..clear_w.end];
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nSTARTTLS\r\n", clear);
+
+    // Encrypted: the mandatory second EHLO (RFC 3207 4.2) and the whole
+    // remainder of the transaction.
+    const tls = tls_buf[0..tls_w.end];
+    try std.testing.expect(std.mem.startsWith(u8, tls, "EHLO github-actions\r\nAUTH PLAIN "));
+    try std.testing.expect(std.mem.indexOf(u8, tls, "MAIL FROM:<bot@example.org>\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tls, "RCPT TO:<one@example.com>\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tls, "RCPT TO:<two@example.net>\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, tls, "QUIT\r\n"));
+    try std.testing.expectEqual(fsm.Phase.quit, diag.phase);
+}
+
+test "STARTTLS: the post-upgrade EHLO replaces the cleartext capability list" {
+    // RFC 3207 4.2 — the pre-upgrade list is unauthenticated and a server may
+    // legitimately advertise differently once encrypted. Here the cleartext
+    // greeting claims only PLAIN and the encrypted one only LOGIN; the
+    // diagnostic must end up reporting the encrypted answer.
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n" ++
+            "220 Ready to start TLS\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed(
+        "250-mail.example.org\r\n250 AUTH LOGIN\r\n" ++
+            "535 5.7.8 Authentication unsuccessful\r\n",
+    );
+    var tls_buf: [4096]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(
+        error.PermanentFailure,
+        runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, &diag),
+    );
+    try std.testing.expectEqual(fsm.Phase.auth, diag.phase);
+    try std.testing.expectEqualStrings("LOGIN", diag.caps.authMechanisms());
+    try std.testing.expect(diag.caps.auth_login);
+    try std.testing.expect(!diag.caps.auth_plain);
+    // The cleartext list said PLAIN. Reporting it here would tell the
+    // operator the opposite of the truth.
+}
+
+test "STARTTLS: a server that does not advertise it gets no command and no fallback" {
+    // The alternative to upgrading is to stop. D-001 was exactly this shape:
+    // a transport failure that quietly continued in the clear.
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250 AUTH PLAIN\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed("250 unreachable\r\n");
+    var tls_buf: [4096]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+
+    try std.testing.expectError(
+        error.StartTlsNotOffered,
+        runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, null),
+    );
+    try std.testing.expectEqual(@as(usize, 0), up.calls);
+
+    // The guard runs BEFORE the command, so STARTTLS never went out; and
+    // nothing carrying the password did either. Only the courtesy QUIT.
+    const clear = clear_buf[0..clear_w.end];
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nQUIT\r\n", clear);
+}
+
+test "STARTTLS: selected without an upgrader is refused before anything is sent" {
+    var r: std.Io.Reader = .fixed("220 mail.example.org ESMTP\r\n");
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    var cfg = test_cfg;
+    cfg.use_starttls = true; // .upgrader deliberately left null
+    try std.testing.expectError(
+        error.StartTlsUnconfigured,
+        runSessionDiag(cfg, .{ .r = &r, .w = &w }, null),
+    );
+    try std.testing.expectEqual(@as(usize, 0), w.end);
+}
+
+test "STARTTLS: a handshake-only probe still upgrades before quitting" {
+    // `handshake_only` stops before authenticating, not before encrypting —
+    // a reachability probe that skipped the upgrade would prove nothing about
+    // whether TLS works against this server, which is the only reason to run
+    // one against port 587.
+    var clear_r: std.Io.Reader = .fixed(
+        "220 mail.example.org ESMTP\r\n" ++
+            "250-mail.example.org\r\n250-STARTTLS\r\n250 AUTH PLAIN\r\n" ++
+            "220 Ready to start TLS\r\n",
+    );
+    var clear_buf: [4096]u8 = undefined;
+    var clear_w: std.Io.Writer = .fixed(&clear_buf);
+
+    var tls_r: std.Io.Reader = .fixed(
+        "250-mail.example.org\r\n250 AUTH PLAIN LOGIN\r\n" ++
+            "221 2.0.0 Bye\r\n",
+    );
+    var tls_buf: [4096]u8 = undefined;
+    var tls_w: std.Io.Writer = .fixed(&tls_buf);
+
+    var up: TestUpgrade = .{ .r = &tls_r, .w = &tls_w };
+    var cfg = test_cfg;
+    cfg.use_starttls = true;
+    cfg.upgrader = up.upgrader();
+    cfg.handshake_only = true;
+
+    var diag: Diagnostic = .{};
+    try runSessionDiag(cfg, .{ .r = &clear_r, .w = &clear_w }, &diag);
+
+    try std.testing.expectEqual(@as(usize, 1), up.calls);
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nSTARTTLS\r\n", clear_buf[0..clear_w.end]);
+    try std.testing.expectEqualStrings("EHLO github-actions\r\nQUIT\r\n", tls_buf[0..tls_w.end]);
+    try std.testing.expectEqual(fsm.Phase.quit, diag.phase);
+    try std.testing.expect(diag.caps.auth_login); // read from the encrypted EHLO
+}
+
+test "the implicit table has no upgrade rows to walk" {
+    // The shipping transport must be unchanged in shape by all of the above.
+    // Proven in the spec as `implicitHasNoUpgrade`; asserted here against the
+    // generated table the driver actually walks.
+    for (fsm.scriptFor(false)) |s| {
+        try std.testing.expect(s.phase != .starttls);
+        try std.testing.expect(s.phase != .ehlo_tls);
+        try std.testing.expect(s.send != .starttls);
+    }
+    var saw_starttls = false;
+    for (fsm.scriptFor(true)) |s| {
+        if (s.phase == .starttls) saw_starttls = true;
+    }
+    try std.testing.expect(saw_starttls);
+}
+
+// AUTH mechanism selection (D-007 / issue #10). The mechanism comes from the
+// capability list, which the STARTTLS path refreshes after the upgrade, so on
+// port 587 these choices are made from the ENCRYPTED advertisement.
+//
+// base64 reference for `test_cfg`: username "u" -> "dQ==", password "p" ->
+// "cA==", AUTH PLAIN "\x00u\x00p" -> "AHUAcA==".
+
+test "AUTH LOGIN: chosen when the server offers LOGIN and not PLAIN" {
+    const replies =
+        "220 mail.example.org ESMTP\r\n" ++
+        "250-mail.example.org\r\n250 AUTH LOGIN XOAUTH2\r\n" ++
+        "334 VXNlcm5hbWU6\r\n" ++
+        "334 UGFzc3dvcmQ6\r\n" ++
+        "235 2.7.0 Authentication successful\r\n" ++
+        "250 2.1.0 Ok\r\n" ++
+        "250 2.1.5 Ok\r\n" ++
+        "250 2.1.5 Ok\r\n" ++
+        "354 End data with <CR><LF>.<CR><LF>\r\n" ++
+        "250 2.0.0 Ok: queued\r\n" ++
+        "221 2.0.0 Bye\r\n";
+    var out: [8192]u8 = undefined;
+    const n = try runScripted(test_cfg, replies, &out);
+    const sent = out[0..n];
+
+    // This is the Microsoft 365 shape: LOGIN and XOAUTH2, no PLAIN.
+    try std.testing.expect(std.mem.indexOf(u8, sent, "AUTH LOGIN\r\ndQ==\r\ncA==\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "AUTH PLAIN") == null);
+    // The session must carry on past AUTH — a mechanism that authenticates and
+    // then fails to deliver is not a fix.
+    try std.testing.expect(std.mem.indexOf(u8, sent, "MAIL FROM:<bot@example.org>\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "QUIT\r\n") != null);
+}
+
+test "AUTH: PLAIN is preferred when the server offers both" {
+    const replies =
+        "220 mail.example.org ESMTP\r\n" ++
+        "250-mail.example.org\r\n250 AUTH PLAIN LOGIN\r\n" ++
+        "235 2.7.0 Authentication successful\r\n" ++
+        "250 2.1.0 Ok\r\n" ++
+        "250 2.1.5 Ok\r\n" ++
+        "250 2.1.5 Ok\r\n" ++
+        "354 End data with <CR><LF>.<CR><LF>\r\n" ++
+        "250 2.0.0 Ok: queued\r\n" ++
+        "221 2.0.0 Bye\r\n";
+    var out: [8192]u8 = undefined;
+    const n = try runScripted(test_cfg, replies, &out);
+    const sent = out[0..n];
+
+    // One round trip beats three, and PLAIN is the path with the longer
+    // history. If this flips, every existing user's session grows two
+    // round trips for no gain.
+    try std.testing.expect(std.mem.indexOf(u8, sent, "AUTH PLAIN AHUAcA==\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "AUTH LOGIN") == null);
+}
+
+test "AUTH: a server advertising only XOAUTH2 is refused before a credential is written" {
+    // XOAUTH2 needs a token from an OAuth flow. Guessing PLAIN at such a
+    // server would put the password on the wire to be rejected — the whole
+    // point of parsing capabilities (D-006) is to not do that.
+    const replies =
+        "220 mail.example.org ESMTP\r\n" ++
+        "250-mail.example.org\r\n250 AUTH XOAUTH2\r\n";
+    var out: [8192]u8 = undefined;
+    var r: std.Io.Reader = .fixed(replies);
+    var w: std.Io.Writer = .fixed(&out);
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(
+        error.AuthMechanismUnsupported,
+        runSessionDiag(test_cfg, .{ .r = &r, .w = &w }, &diag),
+    );
+
+    const sent = out[0..w.end];
+    // Fail-closed, asserted on the BYTES: neither the encoded password nor
+    // the encoded username may appear anywhere, and no AUTH verb went out.
+    try std.testing.expect(std.mem.indexOf(u8, sent, "AUTH") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "AHUAcA==") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "cA==") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "dQ==") == null);
+    // Nothing was chosen, and the operator can be told exactly that.
+    try std.testing.expect(diag.mechanism == null);
+    try std.testing.expectEqualStrings("XOAUTH2", diag.caps.authMechanisms());
+}
+
+test "AUTH: a server that advertises no AUTH line at all still gets PLAIN" {
+    // Regression guard for every implicit-TLS user on 465 whose server simply
+    // does not enumerate mechanisms. This is what shipped in v0.2.0; refusing
+    // here would break working setups in the name of strictness.
+    const replies =
+        "220 mail.example.org ESMTP\r\n" ++
+        "250 mail.example.org\r\n" ++
+        "235 2.7.0 Authentication successful\r\n" ++
+        "250 2.1.0 Ok\r\n" ++
+        "250 2.1.5 Ok\r\n" ++
+        "250 2.1.5 Ok\r\n" ++
+        "354 End data with <CR><LF>.<CR><LF>\r\n" ++
+        "250 2.0.0 Ok: queued\r\n" ++
+        "221 2.0.0 Bye\r\n";
+    var out: [8192]u8 = undefined;
+    const n = try runScripted(test_cfg, replies, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "AUTH PLAIN AHUAcA==\r\n") != null);
+}
+
+test "AUTH LOGIN: a rejection mid-exchange never sends the password" {
+    // The server accepts AUTH LOGIN, prompts, then rejects the USERNAME. This
+    // is the Microsoft 365 shape, and it is the case that distinguishes
+    // "stopped partway" from "never started": the username is on the wire and
+    // the password must not follow it.
+    const replies =
+        "220 mail.example.org ESMTP\r\n" ++
+        "250-mail.example.org\r\n250 AUTH LOGIN\r\n" ++
+        "334 VXNlcm5hbWU6\r\n" ++
+        "535 5.7.8 Authentication unsuccessful, the user could not be found\r\n";
+    var out: [8192]u8 = undefined;
+    var r: std.Io.Reader = .fixed(replies);
+    var w: std.Io.Writer = .fixed(&out);
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(
+        error.PermanentFailure,
+        runSessionDiag(test_cfg, .{ .r = &r, .w = &w }, &diag),
+    );
+
+    const sent = out[0..w.end];
+    try std.testing.expect(std.mem.indexOf(u8, sent, "AUTH LOGIN\r\ndQ==\r\n") != null);
+    // The username went out; the password did NOT.
+    try std.testing.expect(std.mem.indexOf(u8, sent, "cA==\r\n") == null);
+    try std.testing.expectEqual(fsm.Phase.auth, diag.phase);
+    try std.testing.expectEqual(@as(u16, 535), diag.code);
+    try std.testing.expectEqual(Mechanism.login, diag.mechanism.?);
+    try std.testing.expect(std.mem.indexOf(u8, diag.text(), "user could not be found") != null);
+}
+
+test "AUTH LOGIN: a rejection of the verb itself sends no credential at all" {
+    // Some servers refuse AUTH LOGIN outright rather than prompting. Nothing
+    // encoded may reach the wire in that case.
+    const replies =
+        "220 mail.example.org ESMTP\r\n" ++
+        "250-mail.example.org\r\n250 AUTH LOGIN\r\n" ++
+        "504 5.5.4 Unrecognized authentication type\r\n";
+    var out: [8192]u8 = undefined;
+    var r: std.Io.Reader = .fixed(replies);
+    var w: std.Io.Writer = .fixed(&out);
+    var diag: Diagnostic = .{};
+    try std.testing.expectError(
+        error.PermanentFailure,
+        runSessionDiag(test_cfg, .{ .r = &r, .w = &w }, &diag),
+    );
+
+    const sent = out[0..w.end];
+    try std.testing.expect(std.mem.indexOf(u8, sent, "dQ==") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "cA==") == null);
+    try std.testing.expectEqual(@as(u16, 504), diag.code);
 }

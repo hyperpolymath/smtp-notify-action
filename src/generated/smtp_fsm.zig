@@ -3,9 +3,9 @@
 // fresh generation and fails on drift.
 // SPDX-License-Identifier: MPL-2.0
 
-pub const Phase = enum(u8) { connect, ehlo, auth, mail_from, rcpt_to, data, payload, quit, done };
+pub const Phase = enum(u8) { connect, ehlo, starttls, ehlo_tls, auth, mail_from, rcpt_to, data, payload, quit, done };
 
-pub const Action = enum(u8) { none, ehlo, auth_plain, mail_from, rcpt_to, data, payload, quit };
+pub const Action = enum(u8) { none, ehlo, starttls, auth, mail_from, rcpt_to, data, payload, quit };
 
 pub const Step = struct {
     phase: Phase,
@@ -18,16 +18,40 @@ pub const Step = struct {
     repeats: bool,
 };
 
-pub const script = [_]Step{
+/// Session over an already-encrypted or deliberately plain stream.
+/// These rows are the contract that shipped in v0.2.0.
+pub const script_implicit = [_]Step{
     .{ .phase = .connect, .send = .none, .expect = &.{ 220 }, .next = .ehlo, .repeats = false },
     .{ .phase = .ehlo, .send = .ehlo, .expect = &.{ 250 }, .next = .auth, .repeats = false },
-    .{ .phase = .auth, .send = .auth_plain, .expect = &.{ 235 }, .next = .mail_from, .repeats = false },
+    .{ .phase = .auth, .send = .auth, .expect = &.{ 235 }, .next = .mail_from, .repeats = false },
     .{ .phase = .mail_from, .send = .mail_from, .expect = &.{ 250 }, .next = .rcpt_to, .repeats = false },
     .{ .phase = .rcpt_to, .send = .rcpt_to, .expect = &.{ 250, 251 }, .next = .data, .repeats = true },
     .{ .phase = .data, .send = .data, .expect = &.{ 354 }, .next = .payload, .repeats = false },
     .{ .phase = .payload, .send = .payload, .expect = &.{ 250 }, .next = .quit, .repeats = false },
     .{ .phase = .quit, .send = .quit, .expect = &.{ 221 }, .next = .done, .repeats = false },
 };
+
+/// Session that begins in cleartext on the submission port and
+/// upgrades in place (RFC 3207). The second EHLO is mandatory: the
+/// server may advertise differently once the session is encrypted.
+pub const script_starttls = [_]Step{
+    .{ .phase = .connect, .send = .none, .expect = &.{ 220 }, .next = .ehlo, .repeats = false },
+    .{ .phase = .ehlo, .send = .ehlo, .expect = &.{ 250 }, .next = .starttls, .repeats = false },
+    .{ .phase = .starttls, .send = .starttls, .expect = &.{ 220 }, .next = .ehlo_tls, .repeats = false },
+    .{ .phase = .ehlo_tls, .send = .ehlo, .expect = &.{ 250 }, .next = .auth, .repeats = false },
+    .{ .phase = .auth, .send = .auth, .expect = &.{ 235 }, .next = .mail_from, .repeats = false },
+    .{ .phase = .mail_from, .send = .mail_from, .expect = &.{ 250 }, .next = .rcpt_to, .repeats = false },
+    .{ .phase = .rcpt_to, .send = .rcpt_to, .expect = &.{ 250, 251 }, .next = .data, .repeats = true },
+    .{ .phase = .data, .send = .data, .expect = &.{ 354 }, .next = .payload, .repeats = false },
+    .{ .phase = .payload, .send = .payload, .expect = &.{ 250 }, .next = .quit, .repeats = false },
+    .{ .phase = .quit, .send = .quit, .expect = &.{ 221 }, .next = .done, .repeats = false },
+};
+
+/// The table for a transport. Selecting by value rather than exporting
+/// one `script` keeps the caller from silently walking the wrong shape.
+pub fn scriptFor(starttls: bool) []const Step {
+    return if (starttls) &script_starttls else &script_implicit;
+}
 
 pub const StuffVector = struct { input: []const u8, expected: []const u8 };
 

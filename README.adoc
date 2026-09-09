@@ -3,9 +3,13 @@
 :toc: macro
 :source-highlighter: rouge
 
-Send a plain-text notification email from a GitHub workflow over implicit TLS
-(SMTPS, port 465). **Node-free**: the action is a composite step that runs one
-static binary — no `node_modules`, no container, no runtime dependency graph.
+Send a plain-text notification email from a GitHub workflow over TLS, by either
+route: implicit TLS from the first byte (SMTPS, port 465), or a cleartext start
+on the submission port that is upgraded in place with STARTTLS (RFC 3207, port
+587) — which is the route Google Workspace and Microsoft 365 expect, and the
+only one Microsoft 365 offers at all. **Node-free**: the action is a composite
+step that runs one static binary — no `node_modules`, no container, no runtime
+dependency graph.
 
 The SMTP client session is **formally specified in Idris2** (state machine,
 reply-code classes, dot-stuffing, header-injection rejection — with
@@ -37,6 +41,32 @@ toc::[]
     body: '${{ github.actor }} pushed ${{ github.sha }}'
 ----
 
+On the submission port, set `secure` to `starttls` and the port to 587:
+
+[source,yaml]
+----
+- name: Notify by mail
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # newer than v0.2.0
+  with:
+    server_address: smtp.office365.com   # or smtp.gmail.com
+    server_port: 587
+    secure: starttls
+    username: ${{ secrets.SMTP_USERNAME }}
+    password: ${{ secrets.SMTP_PASSWORD }}
+    from: 'GitHub Push <${{ secrets.SMTP_USERNAME }}>'
+    to: 'you@example.org'
+    subject: 'Push to ${{ github.repository }}'
+    body: '${{ github.actor }} pushed ${{ github.sha }}'
+----
+
+IMPORTANT: STARTTLS is on `main` and is *not in v0.2.0*. v0.2.0 speaks implicit
+TLS only, so pinning it with `server_port: 587` will fail. Until the next tag is
+cut, the submission-port route needs a commit newer than v0.2.0. What has been
+verified against live servers is the *upgrade itself* — smtp.gmail.com:587 and
+smtp.office365.com:587 both complete the STARTTLS handshake and the mandatory
+second EHLO. Authentication on that route is covered by tests rather than by a
+live send; see link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] D-005 to D-007.
+
 These nine input names match `dawidd6/action-send-mail` exactly:
 `server_address`, `server_port`, `secure`, `username`, `password`, `from`,
 `to`, `subject`, `body`.
@@ -62,9 +92,10 @@ on and cannot be turned off by any input.
 |`server_port` |`465` |SMTP server port.
 |`secure` |`true` |Fail-closed transport selection, five accepted values.
 `true` or `implicit` = implicit TLS from the first byte (SMTPS).
-`false` or `starttls` = STARTTLS, which is accepted but *not yet implemented*,
-so the step fails with a message rather than downgrading
-(https://github.com/hyperpolymath/smtp-notify-action/issues/5[issue #5]).
+`false` or `starttls` = start in the clear and upgrade with STARTTLS
+(RFC 3207, normally port 587). The upgrade is *mandatory*: a server that does
+not advertise `STARTTLS` fails the step, because the alternative to upgrading
+is to stop, not to carry on in the clear.
 `plaintext` = no TLS, intended only for containerized test sinks. Any other
 value is rejected outright.
 |`username` |— |AUTH PLAIN username.
@@ -155,8 +186,7 @@ always downloads the binary generation it was reviewed with.
 
 * link:MIGRATION.adoc[`MIGRATION.adoc`] — moving a `dawidd6/action-send-mail`
   step across: which inputs transfer, which have drifted, and the two
-  blockers (Microsoft 365, STARTTLS) that mean some workflows should not move
-  yet.
+  provider notes that decide whether a workflow can move today.
 * link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] — what is wrong with *this*
   code, stated by us rather than discovered by you, plus the exact boundary of
   the proof claim and why no CVE has been assigned.
