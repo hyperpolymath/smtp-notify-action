@@ -16,6 +16,8 @@ env:
 jobs:
   release:
     name: Rebuild, verify against action.yml pins, publish
+    permissions:
+      contents: write # needed to publish the release (gh release create)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
