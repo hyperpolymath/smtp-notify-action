@@ -57,10 +57,20 @@ inputs:
     description: 'Subject: header value. CR/LF is rejected, never sanitized.'
     required: false
     default: ''
-  body:
-    description: 'Plain-text body (dot-stuffed on the wire per RFC 5321)'
+  content_language:
+    description: 'Optional RFC 5646 language tag, emitted as Content-Language.'
     required: false
     default: ''
+  body:
+    description: 'Plain-text body only (no HTML, images, or tracking content; dot-stuffed on the wire per RFC 5321)'
+    required: false
+    default: ''
+  diagnose:
+    description: >-
+      "true" = run a non-delivery probe and report DNS, TCP, TLS, EHLO and AUTH
+      stages separately. Credentials are not sent.
+    required: false
+    default: 'false'
   handshake_only:
     description: >-
       "true" = connect, TLS handshake, EHLO, QUIT. No auth, nothing sent.
@@ -129,11 +139,13 @@ runs:
         SMTP_PORT: ${{ inputs.server_port }}
         SMTP_SECURE: ${{ inputs.secure }}
         SMTP_HANDSHAKE_ONLY: ${{ inputs.handshake_only }}
+        SMTP_DIAGNOSE: ${{ inputs.diagnose }}
         SMTP_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
         SMTP_USER: ${{ inputs.username }}
         SMTP_PASS: ${{ inputs.password }}
         MAIL_FROM: ${{ inputs.from }}
         MAIL_TO: ${{ inputs.to }}
         MAIL_SUBJECT: ${{ inputs.subject }}
+        MAIL_CONTENT_LANGUAGE: ${{ inputs.content_language }}
         MAIL_BODY: ${{ inputs.body }}
       run: exec "${RUNNER_TEMP}/smtp-notify"

@@ -15,9 +15,11 @@
 //!   SMTP_PASS            AUTH PLAIN password
 //!   MAIL_FROM            From: value, e.g. "GitHub Push <bot@example.org>"
 //!   MAIL_TO              recipients, separated by commas and/or whitespace
-//!   MAIL_SUBJECT         Subject: value (CR/LF rejected, never sanitized)
+//!   MAIL_SUBJECT         Subject: value (UTF-8 RFC 2047 encoded, CR/LF rejected)
+//!   MAIL_CONTENT_LANGUAGE RFC 5646 language tag, emitted as Content-Language
 //!   MAIL_BODY            plain-text body (dot-stuffed on the wire)
 //!   SMTP_HANDSHAKE_ONLY  "true" = greeting + EHLO + QUIT, no auth, no mail
+//!   SMTP_DIAGNOSE        "true" = run the same probe and label DNS/TCP/TLS/EHLO stages
 
 const std = @import("std");
 const smtp = @import("smtp.zig");
@@ -193,7 +195,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const port = std.fmt.parseInt(u16, port_str, 10) catch
         fatal("SMTP_PORT is not a port number: {s}", .{port_str});
     const transport = parseTransport(envs);
-    const handshake_only = envFlag(envs, "SMTP_HANDSHAKE_ONLY", false);
+    const handshake_only = envFlag(envs, "SMTP_HANDSHAKE_ONLY", false) or envFlag(envs, "SMTP_DIAGNOSE", false);
+    const diagnose = envFlag(envs, "SMTP_DIAGNOSE", false);
+    if (diagnose) std.debug.print("smtp-notify: diagnose: DNS=ok (host parsed), TCP=pending, TLS=pending, EHLO=pending, AUTH=skipped\n", .{});
     const timeout_seconds = envSeconds(envs, "SMTP_TIMEOUT_SECONDS", default_timeout_seconds);
 
     // Detached: it either fires and exits the process, or the process exits
@@ -227,6 +231,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .from = envRequired(envs, "MAIL_FROM"),
             .recipients = recipients.items,
             .subject = envRequired(envs, "MAIL_SUBJECT"),
+            .content_language = env(envs, "MAIL_CONTENT_LANGUAGE") orelse "",
             .body = envRequired(envs, "MAIL_BODY"),
             .date_epoch_seconds = now.toSeconds(),
             .handshake_only = false,

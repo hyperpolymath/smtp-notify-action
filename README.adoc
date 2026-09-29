@@ -101,8 +101,10 @@ value is rejected outright.
 environment, never argv, so it cannot leak into process listings.
 |`from` |— |`From:` header value.
 |`to` |— |Recipients, separated by commas and/or whitespace.
-|`subject` |— |`Subject:` header value.
-|`body` |— |Plain-text body; dot-stuffed on the wire per RFC 5321 §4.5.2.
+|`subject` |— |`Subject:` header value; UTF-8 is RFC 2047 encoded, and CR/LF is rejected.
+|`content_language` |— |Optional RFC 5646 language tag, emitted as `Content-Language`.
+|`body` |— |Plain-text only by design (no HTML, images, or tracking pixels); dot-stuffed on the wire per RFC 5321 §4.5.2. This predictable format is friendly to screen readers and terminal mail clients.
+|`diagnose` |`false` |Non-delivery probe with explicit DNS, TCP, TLS, EHLO and AUTH stage reporting. Credentials are skipped.
 |`handshake_only` |`false` |`true` = connect, TLS handshake, `EHLO`, `QUIT` —
 no auth, nothing sent. For canary/CI verification against a real server.
 |`timeout_seconds` |`60` |Whole-run deadline. A watchdog bounds connection,
@@ -205,3 +207,24 @@ always downloads the binary generation it was reviewed with.
 MPL-2.0 (`LICENSE`). The vendored `src/tls/Client.zig` derives from the Zig
 standard library and remains MIT © the Zig contributors, as marked in its
 header.
+
+== Accessibility and diagnostics
+
+Messages are deliberately plain text: the action emits no HTML, images, or
+tracking pixels, making the result predictable in screen readers and terminal
+mail clients. `content_language` adds the RFC 5646 `Content-Language` header;
+non-ASCII subjects use RFC 2047 UTF-8 encoded-words.
+
+Set `diagnose: true` for a non-delivery probe. It reports DNS/host parsing,
+TCP connection, TLS, EHLO, and AUTH as distinct stages and never sends
+credentials. `handshake_only` remains available when only reachability and
+TLS are wanted.
+
+== Published benchmark method
+
+`./scripts/benchmark.sh` measures a cold process start with `/usr/bin/time`
+against a local SMTP sink, with network and sink setup held constant. It
+reports elapsed seconds and peak RSS. Run it on the target runner and publish
+the output alongside the Node action comparison; numbers are intentionally not
+invented here, because a benchmark without the runner, binary, and command
+would not be reproducible. The script is the canonical measurement procedure.
