@@ -25,6 +25,8 @@ pub const Config = struct {
     from: []const u8,
     recipients: []const []const u8,
     subject: []const u8,
+    /// RFC 5646 language tag for the message (empty omits Content-Language).
+    content_language: []const u8 = "",
     body: []const u8,
     /// Unix seconds for the Date: header.
     date_epoch_seconds: i64,
@@ -537,7 +539,20 @@ fn writePayload(cfg: Config, w: *std.Io.Writer) Error!void {
         try w.writeAll(rcpt);
     }
     try w.writeAll("\r\n");
-    try w.print("Subject: {s}\r\n", .{cfg.subject});
+    try w.writeAll("Subject: ");
+    // RFC 2047 encoded-word keeps non-ASCII subjects valid RFC 5322 headers.
+    // ASCII subjects remain readable and byte-for-byte compatible.
+    var ascii_subject = true;
+    for (cfg.subject) |c| if (c >= 0x80) { ascii_subject = false; break; };
+    if (ascii_subject) {
+        try w.writeAll(cfg.subject);
+    } else {
+        var encoded: [2048]u8 = undefined;
+        const n = std.base64.standard.Encoder.encode(&encoded, cfg.subject);
+        try w.print("=?UTF-8?B?{s}?=", .{encoded[0..n]});
+    }
+    try w.writeAll("\r\n");
+    if (cfg.content_language.len != 0) try w.print("Content-Language: {s}\r\n", .{cfg.content_language});
     try w.writeAll("Date: ");
     try message.writeRfc5322Date(w, cfg.date_epoch_seconds);
     try w.writeAll("\r\n");
