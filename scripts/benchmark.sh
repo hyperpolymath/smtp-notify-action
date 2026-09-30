@@ -62,6 +62,8 @@ stats() {
     }'
 }
 
+# Series $1: $warmup discarded warm-up samples, then $runs samples of the
+# command in the remaining args, written to "$out/$1.samples".
 run_series() {
   local name=$1; shift
   local f="$out/$name.samples"
