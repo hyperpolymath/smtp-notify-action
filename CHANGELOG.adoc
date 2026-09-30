@@ -12,6 +12,65 @@ The unit of release is the *action ref*: the tag or commit you pin determines bo
 
 toc::[]
 
+== v0.4.0 — 2026-09-30
+
+Closes issue #6 (community health, accessibility, self-diagnosis, published
+benchmarks). The first attempt at it (PR #20) was merged with four of eleven
+checks failing and left `main` unable to compile; this release replaces that
+work rather than building on it. See `KNOWN-DEFECTS.adoc`, D-010 and D-011.
+
+=== Added
+
+* *`diagnose` input — a real staged probe.* Reports DNS (what the name resolved
+  to), TCP, TLS (implicit or STARTTLS, certificate verified), EHLO (with the
+  advertised capabilities) and AUTH (which mechanism this client would use) as
+  separate lines, names the stage that failed, marks the rest `not-reached`,
+  and exits 1. A sixth stage, MSG, says whether the configured message
+  inputs would pass the checks a real send runs. A whole-run timeout is
+  attributed to the stage in flight, with the usual cause for that stage and
+  transport (an implicit-TLS client aimed at 587, a cleartext one at 465).
+  Nothing is authenticated or sent; a CI gate asserts the sink stays empty.
+* *`content_language` input.* Emits `Content-Language` (RFC 3282): one or more
+  RFC 5646 tags, comma-separated (`en-GB`, `en, cy`). The grammar lives in the
+  Idris2 spec (`contentLanguageOk`) with spec-evaluated golden vectors, and the
+  theorem `contentLanguageNoInjection` proves nothing it accepts can inject a
+  header. The grammar is a shape check (1–8 ASCII letters or digits per
+  subtag, first alphabetic), looser than full RFC 5646 well-formedness.
+  Values that fail fail the step; values that pass go out trimmed and
+  `, `-joined.
+* *Non-ASCII subjects* are sent as RFC 2047 UTF-8 encoded-words holding
+  whole code points, folded onto continuation lines so that every line —
+  including the first, shared with `Subject: ` — is at most 76 characters. Invalid UTF-8 is refused before the session starts. ASCII subjects
+  are byte-for-byte unchanged from v0.3.0.
+* *Published benchmark.* `docs/benchmarks/2026-09-30.adoc`: a full delivery in
+  a median 6.6 ms and 1.4 MiB peak RSS, against 268.8 ms and 81.2 MiB for
+  `dawidd6/action-send-mail` v22 on Node 24, same sink, 100 runs each.
+  `scripts/benchmark.sh` reproduces it; the manual `Benchmark` workflow runs
+  it on a GitHub-hosted runner.
+* README sections on accessibility (plain text as a deliberate property) and
+  self-diagnosis.
+
+=== Fixed
+
+* `main` compiles again (PR #20 left a type error in the subject encoder).
+* `action.yml` on `main` offered `diagnose` and `content_language` to the
+  v0.3.0 binary, which ignores both: `diagnose: true` *authenticated and
+  delivered a real message*. This release's binary implements them (D-011).
+* `.github/dependabot.yml` was GitHub's template with an empty
+  `package-ecosystem`, which Dependabot rejects; it now watches
+  `github-actions`.
+* Handshake-only runs on the plaintext transport no longer print "delivered".
+* Server reply text in failure messages is folded onto one line with control
+  bytes replaced, so a server cannot start a line in the Actions log (where
+  `::` begins a workflow command).
+* `SMTP_HANDSHAKE_ONLY` is validated even when `SMTP_DIAGNOSE` decides the run.
+
+=== Changed
+
+* The TLS setup is one definition (`TlsEnv` in `src/main.zig`) shared by
+  delivery on 465, delivery on 587 and the diagnose probe, so certificate
+  verification cannot differ between them.
+
 == v0.3.0 — 2026-09-09
 
 [IMPORTANT]
