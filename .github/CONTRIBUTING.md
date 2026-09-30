@@ -79,12 +79,15 @@ asset URL and pins — never on `main` ahead of it. D-011 in
 `KNOWN-DEFECTS.adoc` is what happens otherwise: `diagnose: true` reached a
 binary that ignored it and delivered real mail.
 
-## Dependabot and `actions.lock`
+## Pins, `actions.lock`, and why there is no Dependabot
 
 Workflows are pinned through `.github/workflows/actions.lock`, managed by
-`gh actions-lock`. Dependabot watches `github-actions`; a Dependabot PR is not
-mergeable until `gh actions-lock` has been re-run on its branch so the lock
-matches the workflows.
+`gh actions-lock`, and the lock tool owns pin bumps (standards
+cicd-regularisation design §6.4). There is deliberately no
+`.github/dependabot.yml`: the only ecosystem here that Dependabot could watch
+is `github-actions`, its bump PRs break the lock, and the Zig build has
+`.dependencies = .{}`. Re-run `gh actions-lock` in the same PR as any
+`uses:` change.
 
 ## Pull requests
 

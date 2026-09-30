@@ -56,9 +56,9 @@ work rather than building on it. See `KNOWN-DEFECTS.adoc`, D-010 and D-011.
 * `action.yml` on `main` offered `diagnose` and `content_language` to the
   v0.3.0 binary, which ignores both: `diagnose: true` *authenticated and
   delivered a real message*. This release's binary implements them (D-011).
-* `.github/dependabot.yml` was GitHub's template with an empty
-  `package-ecosystem`, which Dependabot rejects; it now watches
-  `github-actions`.
+* `.github/dependabot.yml` removed. It was GitHub's template with an empty
+  `package-ecosystem` (invalid, so it watched nothing), and a valid one would
+  only duplicate the lock tool, which owns pin bumps here.
 * Handshake-only runs on the plaintext transport no longer print "delivered".
 * Server reply text in failure messages is folded onto one line with control
   bytes replaced, so a server cannot start a line in the Actions log (where
