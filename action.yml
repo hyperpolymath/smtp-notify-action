@@ -125,11 +125,11 @@ runs:
         case "$(uname -m)" in
           x86_64)
             asset="smtp-notify-x86_64-linux-musl"
-            sha256="daaa1805ca2e19f743efa124748a597ff3f189074e901772d33b8c136908d56a"
+            sha256="d4cee25312c49a2b6f83fa6320e238d3823ccbe371055701e49ff59339096165"
             ;;
           aarch64)
             asset="smtp-notify-aarch64-linux-musl"
-            sha256="88aee089caa524482e95e9549ee6a8b7dbc8f9ff9ac9beebc5e8261600afa03c"
+            sha256="99677930e4fc22e0b4821218d3bb1ad9f36f7839854418d6222405c3fd246018"
             ;;
           *)
             echo "smtp-notify: unsupported runner architecture: $(uname -m)" >&2

@@ -11,6 +11,7 @@
 const std = @import("std");
 const fsm = @import("generated/smtp_fsm.zig");
 
+/// True when a body line starts with "." and so must be dot-stuffed.
 pub fn needsStuffing(line: []const u8) bool {
     return line.len > 0 and line[0] == '.';
 }
@@ -34,14 +35,17 @@ pub fn headerValueOk(value: []const u8) bool {
     return true;
 }
 
+/// ASCII letter test; RFC 5646 subtags are ASCII only.
 fn isAsciiAlpha(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
 }
 
+/// ASCII letter-or-digit test; RFC 5646 subtags are ASCII only.
 fn isAsciiAlphaNum(c: u8) bool {
     return isAsciiAlpha(c) or (c >= '0' and c <= '9');
 }
 
+/// One subtag: 1-8 ASCII letters or digits. Mirrors `subtagOk` in the spec.
 fn subtagOk(s: []const u8) bool {
     if (s.len < 1 or s.len > 8) return false;
     for (s) |c| if (!isAsciiAlphaNum(c)) return false;
@@ -91,6 +95,7 @@ pub fn subjectEncodable(subject: []const u8) bool {
     return std.unicode.utf8ValidateSlice(subject);
 }
 
+/// True when every byte is 7-bit, so the subject can go out unencoded.
 fn isAscii(s: []const u8) bool {
     for (s) |c| if (c >= 0x80) return false;
     return true;

@@ -222,10 +222,12 @@ pub const Diagnostic = struct {
     /// was never reached, or when nothing on offer could be driven.
     mechanism: ?Mechanism = null,
 
+    /// The retained reply text: server bytes only, possibly truncated.
     pub fn text(d: *const Diagnostic) []const u8 {
         return d.buf[0..d.len];
     }
 
+    /// Store `reply` (and the capability set in force) as the last one read.
     fn record(d: *Diagnostic, phase: fsm.Phase, reply: Reply, caps: Capabilities) void {
         d.phase = phase;
         d.code = reply.code;
@@ -248,6 +250,7 @@ pub const Wire = struct {
     /// then be flushed itself for the records to reach the socket.
     below: ?*std.Io.Writer = null,
 
+    /// Flush this layer and, for TLS, the transport writer beneath it.
     pub fn flush(wire: Wire) std.Io.Writer.Error!void {
         try wire.w.flush();
         if (wire.below) |b| try b.flush();
@@ -267,6 +270,7 @@ pub const Upgrader = struct {
     ctx: *anyopaque,
     upgradeFn: *const fn (ctx: *anyopaque) anyerror!Wire,
 
+    /// Run the caller's handshake and return the encrypted stream.
     pub fn upgrade(u: Upgrader) anyerror!Wire {
         return u.upgradeFn(u.ctx);
     }
@@ -400,6 +404,7 @@ pub fn runSessionDiag(cfg: Config, wire_in: Wire, diag: ?*Diagnostic) Error!void
     }
 }
 
+/// The table row for `phase`, or null when this table has none.
 fn lookupStep(table: []const fsm.Step, phase: fsm.Phase) ?fsm.Step {
     for (table) |s| {
         if (s.phase == phase) return s;
@@ -407,6 +412,7 @@ fn lookupStep(table: []const fsm.Step, phase: fsm.Phase) ?fsm.Step {
     return null;
 }
 
+/// Write the command a table row sends. AUTH is driven by `runAuth` instead.
 fn sendAction(cfg: Config, action: fsm.Action, rcpt_index: usize, w: *std.Io.Writer) Error!void {
     switch (action) {
         .none => {}, // server speaks first (greeting)
@@ -634,6 +640,7 @@ const test_cfg: Config = .{
     .date_epoch_seconds = 1_000_000_000,
 };
 
+/// Test helper: run a whole session against scripted replies; returns bytes written.
 fn runScripted(cfg: Config, replies: []const u8, out: []u8) Error!usize {
     var r: std.Io.Reader = .fixed(replies);
     var w: std.Io.Writer = .fixed(out);
@@ -757,6 +764,7 @@ test {
 // Tests: reply text and diagnostics (issue #3).
 // ---------------------------------------------------------------------------
 
+/// Test helper: read one reply from a fixed string.
 fn readOne(replies: []const u8, buf: []u8) !Reply {
     var r: std.Io.Reader = .fixed(replies);
     return readReply(&r, buf);
@@ -940,6 +948,7 @@ const TestUpgrade = struct {
     w: *std.Io.Writer,
     calls: usize = 0,
 
+    /// Test upgrader: swap to the scripted post-TLS stream.
     fn upgrade(ctx: *anyopaque) anyerror!Wire {
         const self: *TestUpgrade = @ptrCast(@alignCast(ctx));
         self.calls += 1;

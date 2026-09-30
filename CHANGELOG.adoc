@@ -43,7 +43,7 @@ work rather than building on it. See `KNOWN-DEFECTS.adoc`, D-010 and D-011.
   including the first, shared with `Subject: ` — is at most 76 characters. Invalid UTF-8 is refused before the session starts. ASCII subjects
   are byte-for-byte unchanged from v0.3.0.
 * *Published benchmark.* `docs/benchmarks/2026-09-30.adoc`: a full delivery in
-  a median 6.6 ms and 1.4 MiB peak RSS, against 268.8 ms and 81.2 MiB for
+  a median 7.5 ms and 1.4 MiB peak RSS, against 288.5 ms and 81.4 MiB for
   `dawidd6/action-send-mail` v22 on Node 24, same sink, 100 runs each.
   `scripts/benchmark.sh` reproduces it; the manual `Benchmark` workflow runs
   it on a GitHub-hosted runner.
@@ -59,6 +59,14 @@ work rather than building on it. See `KNOWN-DEFECTS.adoc`, D-010 and D-011.
 * `.github/dependabot.yml` removed. It was GitHub's template with an empty
   `package-ecosystem` (invalid, so it watched nothing), and a valid one would
   only duplicate the lock tool, which owns pin bumps here.
+* The vendored TLS client's CertificateRequest handling now checks the
+  message's shape: every extension fits its declared length, the list fills
+  the message, and the mandatory `signature_algorithms` extension (RFC 8446
+  §4.3.2) is present. Previously the extensions were skipped unparsed.
+  Found by CodeRabbit review of PR #21.
+* `scripts/benchmark.sh` forces full delivery (an inherited `SMTP_DIAGNOSE` or
+  `SMTP_HANDSHAKE_ONLY` no longer turns samples into probes) and reports only
+  the series run by that invocation. Found by CodeRabbit review of PR #21.
 * Handshake-only runs on the plaintext transport no longer print "delivered".
 * Server reply text in failure messages is folded onto one line with control
   bytes replaced, so a server cannot start a line in the Actions log (where

@@ -39,6 +39,11 @@ out=${OUT:-bench-out}
 [ -x /usr/bin/time ] || { echo "needs GNU time at /usr/bin/time" >&2; exit 1; }
 [ -x "$bin" ] || { echo "no binary at $bin; run zig build -Doptimize=ReleaseSafe" >&2; exit 1; }
 mkdir -p "$out"
+# Only series run by THIS invocation are reported: stale samples from an
+# earlier run (e.g. a dawidd6 series when DAWIDD6_DIR is now unset) must not
+# reach the table.
+rm -f "$out"/*.samples
+ran=()
 
 # One sample: prints "<wall_ms> <rss_kib>".
 sample() {
@@ -70,9 +75,13 @@ run_series() {
   : > "$f"
   for _ in $(seq "$warmup"); do sample "$@" >/dev/null; done
   for _ in $(seq "$runs"); do sample "$@" >> "$f"; done
+  ran+=("$name")
 }
 
 # --- this action ----------------------------------------------------------
+# Every run must be a full delivery: an inherited SMTP_DIAGNOSE or
+# SMTP_HANDSHAKE_ONLY would silently turn samples into non-delivery probes.
+export SMTP_DIAGNOSE=false SMTP_HANDSHAKE_ONLY=false
 export SMTP_SECURE=plaintext SMTP_USER=bench SMTP_PASS=bench \
   MAIL_FROM='Bench <bench@example.test>' MAIL_TO='sink@example.test' \
   MAIL_SUBJECT='smtp-notify benchmark' MAIL_BODY='benchmark body'
@@ -100,9 +109,8 @@ fi
 echo
 echo "| Program | wall median (ms) | wall p95 (ms) | wall min–max (ms) | peak RSS median (MiB) |"
 echo "|---|---:|---:|---:|---:|"
-for name in smtp-notify dawidd6; do
+for name in "${ran[@]}"; do
   f="$out/$name.samples"
-  [ -s "$f" ] || continue
   read -r wmed wp95 wmin wmax <<<"$(stats "$f" 1)"
   read -r rmed _ _ _ <<<"$(stats "$f" 2)"
   awk -v n="$name" -v a="$wmed" -v b="$wp95" -v c="$wmin" -v d="$wmax" -v r="$rmed" \

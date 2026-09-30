@@ -207,8 +207,9 @@ Two inputs support it:
   or Chinese arrives as written instead of as mojibake.
 
 Diagnostic output is one line per stage, status word after the stage name,
-so the answer is the first status that is not `ok` — no table to navigate, no
-colour to see.
+so the answer is the first `FAIL` — no table to navigate, no colour to see.
+`skipped` is not a failure: it means the stage does not apply (TLS under
+`secure: plaintext`, MSG with no message inputs set).
 
 [[diagnose]]
 == Self-diagnosis
@@ -276,11 +277,11 @@ same local sink, 100 runs each after three warm-ups:
 [cols="2,1,1,1",options="header"]
 |===
 |Program |Wall, median |Wall, p95 |Peak RSS, median
-|smtp-notify (static musl, 0.98 MB) |6.6 ms |8.7 ms |1.4 MiB
-|dawidd6/action-send-mail v22, Node 24 |268.8 ms |319.2 ms |81.2 MiB
+|smtp-notify (static musl, 0.98 MB) |7.5 ms |9.4 ms |1.4 MiB
+|dawidd6/action-send-mail v22, Node 24 |288.5 ms |349.9 ms |81.4 MiB
 |===
 
-About 40× faster to a delivered message and about 60× less memory. The method,
+About 38× faster to a delivered message and about 60× less memory. The method,
 the host, the exact versions and the caveats — chiefly that this was a 2-vCPU
 Linux VM, not a GitHub-hosted runner, and that neither action's download is
 included — are in
