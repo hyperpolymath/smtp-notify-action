@@ -34,6 +34,8 @@ const TlsClient = @import("tls/Client.zig");
 
 const tls_buf_len = std.crypto.tls.max_ciphertext_record_len;
 
+/// Print one prefixed line to stderr and exit 1. Every configuration and
+/// session failure ends here, so the step fails loudly and says why.
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print("smtp-notify: " ++ fmt ++ "\n", args);
     std.process.exit(1);
@@ -41,10 +43,12 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 
 const Env = std.process.Environ.Map;
 
+/// Look up an environment variable; null when it is unset.
 fn env(map: *const Env, name: []const u8) ?[]const u8 {
     return map.get(name);
 }
 
+/// A required environment variable. Unset and empty are both fatal.
 fn envRequired(map: *const Env, name: []const u8) []const u8 {
     // Empty counts as missing: a composite action maps an unset input to an
     // empty env var, and passing "" through (e.g. as the password) would
@@ -104,6 +108,8 @@ fn parseTransport(map: *const Env) Transport {
 
 const default_timeout_seconds: u32 = 60;
 
+/// A positive whole number of seconds from the environment, or `default`
+/// when unset or empty. Zero is refused: a run with no deadline is not offered.
 fn envSeconds(map: *const Env, name: []const u8, default: u32) u32 {
     const v = env(map, name) orelse return default;
     if (v.len == 0) return default;
@@ -177,6 +183,8 @@ comptime {
         @compileError("SafeConnectOptions must not carry a timeout: see BUSTFILE.adoc BUST-2026-001");
 }
 
+/// Open a TCP stream to `host:port` without a connect timeout. The only
+/// place `IpAddress.ConnectOptions` is built; see `SafeConnectOptions`.
 fn connectNoTimeout(
     host: std.Io.net.HostName,
     io: std.Io,
@@ -192,6 +200,8 @@ fn connectNoTimeout(
     });
 }
 
+/// Entry point: read configuration from the environment, start the whole-run
+/// watchdog, then run a delivery, a handshake-only probe, or a diagnose probe.
 pub fn main(init: std.process.Init.Minimal) !void {
     const gpa = std.heap.smp_allocator;
 
@@ -363,6 +373,7 @@ const TlsEnv = struct {
     bundle: std.crypto.Certificate.Bundle,
     lock: std.Io.RwLock,
 
+    /// Allocate the buffers, draw entropy and load the system CA bundle. Fatal on failure.
     fn init(self: *TlsEnv, gpa: std.mem.Allocator, io: std.Io, now: std.Io.Timestamp) void {
         self.read_buf = gpa.alloc(u8, tls_buf_len + 4096) catch |err| fatal("{t}", .{err});
         self.write_buf = gpa.alloc(u8, 4096) catch |err| fatal("{t}", .{err});
@@ -373,6 +384,7 @@ const TlsEnv = struct {
         self.lock = .init;
     }
 
+    /// Client options for `addr`: explicit host, system CA bundle, default checks.
     fn options(self: *TlsEnv, gpa: std.mem.Allocator, io: std.Io, addr: []const u8, now: std.Io.Timestamp) TlsClient.Options {
         return .{
             .host = .{ .explicit = addr },
@@ -425,6 +437,7 @@ fn timeoutHint(stage: Stage) []const u8 {
 const no_stage: u8 = 0xff;
 var diagnose_stage: std.atomic.Value(u8) = .init(no_stage);
 
+/// Record the diagnose stage now in flight, for the watchdog to report.
 fn enter(stage: Stage) void {
     diagnose_stage.store(@intFromEnum(stage), .release);
 }
@@ -434,6 +447,7 @@ fn enter(stage: Stage) void {
 /// TLS upgrade, so "everything after the failed enum value" would drop TLS.
 var reported_stages: std.atomic.Value(u8) = .init(0);
 
+/// Print one diagnose stage line and mark the stage as reported.
 fn stageLine(stage: Stage, status: []const u8, comptime fmt: []const u8, args: anytype) void {
     _ = reported_stages.fetchOr(@as(u8, 1) << @as(u3, @intCast(@intFromEnum(stage))), .acq_rel);
     if (fmt.len == 0) {
@@ -456,6 +470,7 @@ fn stageFail(failed: Stage, comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
+/// Print the capabilities the server advertised at EHLO, one line.
 fn capsSummary(caps: *const smtp.Capabilities) void {
     var size_buf: [32]u8 = undefined;
     // RFC 1870: SIZE 0 means "no fixed limit", and no SIZE line means the
@@ -698,6 +713,7 @@ fn checkMessageInputs(gpa: std.mem.Allocator, envs: *const Env) MsgVerdict {
     return .ok;
 }
 
+/// Plain-language reason for a message-input refusal, for the MSG stage.
 fn msgReason(err: smtp.SessionError) []const u8 {
     return switch (err) {
         error.HeaderInjection => "CR/LF in from, to, subject or content_language",
@@ -741,6 +757,8 @@ const TlsUpgrade = struct {
     diagnosing: bool = false,
     failure: ?anyerror = null,
 
+    /// The upgrade callback: handshake over the existing socket and hand back the
+    /// encrypted stream, or fail the session.
     fn run(ctx: *anyopaque) anyerror!smtp.Wire {
         const self: *TlsUpgrade = @ptrCast(@alignCast(ctx));
         if (self.diagnosing) enter(.TLS);
@@ -767,6 +785,8 @@ const TlsUpgrade = struct {
     }
 };
 
+/// Report a failed session — the server's own words where it gave any, the
+/// AUTH mechanisms on offer where AUTH failed — and exit 1.
 fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.Diagnostic) noreturn {
     // The server's own words, when it got as far as saying any. Without this a
     // 535, a 550 and a 554 are one indistinguishable failure in the log

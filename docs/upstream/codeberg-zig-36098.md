@@ -26,7 +26,11 @@ What the patch does:
 
 1. Accepts `certificate_request` in the TLS 1.3 handshake loop (it currently
    falls through to `error.TlsUnexpectedMessage`), adding it to the
-   transcript and noting that a certificate was requested.
+   transcript and noting that a certificate was requested. The message is
+   checked for shape: an empty `certificate_request_context`, extensions that
+   each fit their declared length and exactly fill the message, and the
+   mandatory `signature_algorithms` extension (RFC 8446 §4.3.2). The
+   extension *contents* are not acted on, since the reply declines anyway.
 2. When a certificate was requested, sends an empty `Certificate` message
    (context echoed, zero-length list) in the client's encrypted flight,
    before `Finished`, with the transcript hash updated accordingly so the
@@ -179,7 +183,7 @@ needs.
  
                                      const client_secret = hkdfExpandLabel(P.Hkdf, pv.master_secret, "c ap traffic", &handshake_hash, P.Hash.digest_length);
                                      const server_secret = hkdfExpandLabel(P.Hkdf, pv.master_secret, "s ap traffic", &handshake_hash, P.Hash.digest_length);
-@@ -952,6 +1016,33 @@
+@@ -952,6 +1016,51 @@
                              .ssl_key_log = options.ssl_key_log,
                          };
                      },
@@ -201,11 +205,29 @@ needs.
 +                        // SHALL be zero length except in post-handshake
 +                        // authentication, which this client never offers.
 +                        if (cert_req_ctx_len != 0) return error.TlsIllegalParameter;
-+                        // The extensions body is deliberately unparsed: we
-+                        // decline with an empty Certificate no matter which
-+                        // algorithms the server lists, and the outer loop
-+                        // advances by handshake-message length, not by how
-+                        // much of `hsd` was consumed.
++                        // The extensions are parsed for SHAPE only: every
++                        // extension must fit its declared length, the list
++                        // must fill the message exactly, and the mandatory
++                        // signature_algorithms extension (RFC 8446 §4.3.2)
++                        // must be present. Their CONTENT is not acted on: we
++                        // decline with an empty Certificate whatever the
++                        // server lists.
++                        try hsd.ensure(2);
++                        const cr_ext_size = hsd.decode(u16);
++                        var cr_extd = try hsd.sub(cr_ext_size);
++                        if (!hsd.eof()) return error.TlsDecodeError;
++                        var saw_sig_algs = false;
++                        while (!cr_extd.eof()) {
++                            try cr_extd.ensure(4);
++                            const et = cr_extd.decode(tls.ExtensionType);
++                            const ext_size = cr_extd.decode(u16);
++                            _ = try cr_extd.sub(ext_size);
++                            if (et == .signature_algorithms) saw_sig_algs = true;
++                        }
++                        // RFC 8446 wants a missing_extension alert; the std
++                        // error set has no such member and this patch adds
++                        // none, so the nearest existing one is used.
++                        if (!saw_sig_algs) return error.TlsIllegalParameter;
 +                        client_cert_requested = true;
 +                        // handshake_state stays .certificate — the server's
 +                        // own Certificate message is still expected next.

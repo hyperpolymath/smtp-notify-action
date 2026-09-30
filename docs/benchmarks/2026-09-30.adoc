@@ -13,13 +13,13 @@ toc::[]
 [cols="3,1,1,1,1",options="header"]
 |===
 |Program |Wall, median |Wall, p95 |Wall, min–max |Peak RSS, median
-|smtp-notify v0.4.0, `x86_64-linux-musl` (979,488 bytes, static)
-|6.6 ms |8.7 ms |5.6–17.8 ms |1.4 MiB
+|smtp-notify v0.4.0, `x86_64-linux-musl` (980,096 bytes, static)
+|7.5 ms |9.4 ms |6.0–20.8 ms |1.4 MiB
 |dawidd6/action-send-mail v22 (`67ce3558d613`), Node v24.21.0
-|268.8 ms |319.2 ms |239.9–387.1 ms |81.2 MiB
+|288.5 ms |349.9 ms |245.2–376.1 ms |81.4 MiB
 |===
 
-About 40× less time to a delivered message, about 60× less memory.
+About 38× less time to a delivered message, about 60× less memory.
 
 == What was measured
 
@@ -35,7 +35,7 @@ About 40× less time to a delivered message, about 60× less memory.
 * The Node action was invoked the way the runner invokes a `node24` action:
   `node main.js` with inputs as `INPUT_*` environment variables.
 * The smtp-notify binary is byte-identical to the v0.4.0 release asset:
-  SHA-256 `daaa1805ca2e19f743efa124748a597ff3f189074e901772d33b8c136908d56a`,
+  SHA-256 `d4cee25312c49a2b6f83fa6320e238d3823ccbe371055701e49ff59339096165`,
   the pin in `action.yml`.
 
 == What was not measured, and why the numbers are not more than they are
