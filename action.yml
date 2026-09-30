@@ -54,11 +54,17 @@ inputs:
     required: false
     default: ''
   subject:
-    description: 'Subject: header value. CR/LF is rejected, never sanitized.'
+    description: >-
+      Subject: header value. Non-ASCII text is sent as RFC 2047 UTF-8
+      encoded-words; CR/LF or invalid UTF-8 is rejected, never sanitized.
     required: false
     default: ''
   content_language:
-    description: 'Optional RFC 5646 language tag, emitted as Content-Language.'
+    description: >-
+      Optional Content-Language header (RFC 3282): one or more RFC 5646
+      language tags, comma-separated, e.g. "en-GB" or "en, cy". Shape-checked
+      (1-8 ASCII letters/digits per subtag, first alphabetic; no registry
+      lookup); a value that fails fails the step rather than being repaired.
     required: false
     default: ''
   body:
@@ -67,8 +73,11 @@ inputs:
     default: ''
   diagnose:
     description: >-
-      "true" = run a non-delivery probe and report DNS, TCP, TLS, EHLO and AUTH
-      stages separately. Credentials are not sent.
+      "true" = non-delivery probe. Reports DNS, TCP, TLS, EHLO and AUTH as
+      separate stages, one line each, then MSG (whether the message inputs
+      would pass local checks), and names the stage that failed. AUTH reports
+      which mechanism this client would use; no credential is sent, so a wrong
+      password is NOT detected. Nothing is delivered.
     required: false
     default: 'false'
   handshake_only:
@@ -116,18 +125,18 @@ runs:
         case "$(uname -m)" in
           x86_64)
             asset="smtp-notify-x86_64-linux-musl"
-            sha256="3477c649d682fafcae00faf00a25b922f8d3bc44a7cb5e889bff95713df22e97"
+            sha256="daaa1805ca2e19f743efa124748a597ff3f189074e901772d33b8c136908d56a"
             ;;
           aarch64)
             asset="smtp-notify-aarch64-linux-musl"
-            sha256="91012ae5f71ac1d7e7e4f8b159cede65e98d2550ddfab67d34da29e6b0e0bcbd"
+            sha256="88aee089caa524482e95e9549ee6a8b7dbc8f9ff9ac9beebc5e8261600afa03c"
             ;;
           *)
             echo "smtp-notify: unsupported runner architecture: $(uname -m)" >&2
             exit 1
             ;;
         esac
-        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.3.0/${asset}"
+        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.4.0/${asset}"
         curl -fsSL --retry 3 --retry-delay 2 -o "${RUNNER_TEMP}/smtp-notify" "$url"
         echo "${sha256}  ${RUNNER_TEMP}/smtp-notify" | sha256sum -c -
         chmod +x "${RUNNER_TEMP}/smtp-notify"

@@ -28,7 +28,7 @@ toc::[]
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.3.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.4.0
   with:
     server_address: ${{ secrets.SMTP_HOST }}
     server_port: 465
@@ -46,7 +46,7 @@ On the submission port, set `secure` to `starttls` and the port to 587:
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.3.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.4.0
   with:
     server_address: smtp.office365.com   # or smtp.gmail.com
     server_port: 587
@@ -96,15 +96,26 @@ not advertise `STARTTLS` fails the step, because the alternative to upgrading
 is to stop, not to carry on in the clear.
 `plaintext` = no TLS, intended only for containerized test sinks. Any other
 value is rejected outright.
-|`username` |— |AUTH PLAIN username.
-|`password` |— |AUTH PLAIN password. Passed to the binary via the
-environment, never argv, so it cannot leak into process listings.
+|`username` |— |SMTP username. The mechanism (`PLAIN` or `LOGIN`) is chosen
+from what the server advertises.
+|`password` |— |SMTP password. Passed to the binary via the environment,
+never argv, so it cannot leak into process listings.
 |`from` |— |`From:` header value.
 |`to` |— |Recipients, separated by commas and/or whitespace.
-|`subject` |— |`Subject:` header value; UTF-8 is RFC 2047 encoded, and CR/LF is rejected.
-|`content_language` |— |Optional RFC 5646 language tag, emitted as `Content-Language`.
-|`body` |— |Plain-text only by design (no HTML, images, or tracking pixels); dot-stuffed on the wire per RFC 5321 §4.5.2. This predictable format is friendly to screen readers and terminal mail clients.
-|`diagnose` |`false` |Non-delivery probe with explicit DNS, TCP, TLS, EHLO and AUTH stage reporting. Credentials are skipped.
+|`subject` |— |`Subject:` header value. ASCII is sent unchanged; anything
+else goes out as RFC 2047 UTF-8 encoded-words, folded so no word exceeds 75
+characters. CR/LF, or non-ASCII that is not valid UTF-8, fails the step.
+|`content_language` |— |Optional `Content-Language` (RFC 3282): one or more
+RFC 5646 tags, comma-separated — `en-GB`, or `en, cy` for a bilingual
+message. Shape-checked (subtags of 1–8 ASCII letters or digits, the first
+alphabetic) — looser than full RFC 5646 well-formedness, and not checked
+against the IANA registry. A value that fails fails the step rather than
+being repaired; one that passes is sent trimmed and `, `-joined.
+|`body` |— |Plain text only, by design: no HTML, no remote images, no
+tracking pixels. Dot-stuffed on the wire per RFC 5321 §4.5.2.
+|`diagnose` |`false` |`true` = non-delivery probe reporting DNS, TCP, TLS,
+EHLO and AUTH as separate stages. Nothing is authenticated or sent. See
+<<diagnose>>.
 |`handshake_only` |`false` |`true` = connect, TLS handshake, `EHLO`, `QUIT` —
 no auth, nothing sent. For canary/CI verification against a real server.
 |`timeout_seconds` |`60` |Whole-run deadline. A watchdog bounds connection,
@@ -125,8 +136,12 @@ link:BUSTFILE.adoc[`BUSTFILE.adoc`].
 * **The credential never touches argv.** All configuration reaches the binary
   as environment variables.
 * **Header injection is rejected, never sanitized.** CR or LF anywhere in
-  `from`, `to`, or `subject` aborts the run before any byte reaches the wire.
-  The rejection predicate is part of the Idris2 specification.
+  `from`, `to`, `subject` or `content_language` aborts the run before any byte
+  reaches the wire. The rejection predicate is part of the Idris2
+  specification. For `content_language` the acceptance predicate is stated as
+  the tag grammar *and* that rejection check, and the theorem
+  `contentLanguageNoInjection` pins the conjunction — dropping the injection
+  check breaks the proof, not merely a test.
 * **Proven protocol core.** The RFC 5321 client session — which commands may
   follow which replies, how reply codes classify, when `DATA` content must be
   dot-stuffed — is an Idris2 specification with machine-checked proofs.
@@ -154,7 +169,8 @@ verification against the system CA bundle is on and cannot be disabled.
 ----
 spec/                Idris2: proven protocol specification (source of truth)
   Smtp/StateMachine.idr    session FSM + 5 protocol proofs
-  Smtp/Serialize.idr       dot-stuffing + header rejection + stuffing theorem
+  Smtp/Serialize.idr       dot-stuffing, header rejection, Content-Language
+                           grammar; stuffing + no-injection theorems
   Smtp/EmitZig.idr         emits the Zig table + golden vectors
 src/
   generated/smtp_fsm.zig   GENERATED — never edit; CI diffs it against spec
@@ -174,6 +190,104 @@ scripts/check-fsm-drift.sh --selftest                 # spec ↔ generated diff
 SMTP_HANDSHAKE_ONLY=true SMTP_SECURE=true \
 SMTP_ADDR=smtp.gmail.com SMTP_PORT=465 ./zig-out/bin/smtp-notify
 ----
+
+== Accessibility
+
+Messages are plain text, deliberately and permanently: no HTML, no remote
+images, no tracking pixel. That is an accessibility property, not a missing
+feature — the message reads the same in a screen reader, a terminal mail
+client and a braille display, and there is no layout to fail.
+
+Two inputs support it:
+
+* `content_language` tells assistive technology which language the message is
+  in, so a screen reader picks the right voice and pronunciation rules. Use a
+  list for bilingual messages (`en, cy`).
+* Non-ASCII subjects are encoded per RFC 2047, so a subject in Welsh, Polish
+  or Chinese arrives as written instead of as mojibake.
+
+Diagnostic output is one line per stage, status word after the stage name,
+so the answer is the first status that is not `ok` — no table to navigate, no
+colour to see.
+
+[[diagnose]]
+== Self-diagnosis
+
+`diagnose: true` probes the server without delivering anything and reports
+each stage on its own line (server text is folded onto that line, never
+allowed to start one):
+
+[source]
+----
+smtp-notify: diagnose: probing smtp.example.org:587 (starttls); no credential and no mail will be sent
+smtp-notify: diagnose: DNS  ok          smtp.example.org -> 192.0.2.10:587
+smtp-notify: diagnose: TCP  ok          connected to port 587
+smtp-notify: diagnose: TLS  ok          STARTTLS upgrade, certificate verified for smtp.example.org
+smtp-notify: diagnose: EHLO ok          server answered EHLO (after the upgrade)
+smtp-notify: diagnose:      capabilities: STARTTLS=no 8BITMIME=yes SIZE=35882577 AUTH=[LOGIN XOAUTH2]
+smtp-notify: diagnose: AUTH ok          this client would use LOGIN (credentials not sent, not verified)
+smtp-notify: diagnose: MSG  ok          from/to/subject/content_language would be accepted
+smtp-notify: diagnose: all stages ok; nothing was authenticated or sent
+----
+
+A failure names its stage and marks the rest `not-reached`, then exits 1:
+
+[source]
+----
+smtp-notify: diagnose: TLS  FAIL        server did not advertise STARTTLS (advertised: STARTTLS=no, AUTH=[PLAIN LOGIN])
+smtp-notify: diagnose: AUTH not-reached
+smtp-notify: diagnose: MSG  not-reached
+smtp-notify: diagnose: FAILED at TLS; nothing was authenticated or sent
+----
+
+What each stage establishes, and no more:
+
+[cols="1,4"]
+|===
+|`DNS` |The name resolved, and to what.
+|`TCP` |A connection to the port was accepted.
+|`TLS` |A verified handshake — implicit, or the STARTTLS upgrade. `skipped`
+under `secure: plaintext`.
+|`EHLO` |The server greeted and answered EHLO (on STARTTLS, the post-upgrade
+EHLO); its advertised capabilities are printed.
+|`AUTH` |Which mechanism this client *would* use, chosen from the
+post-TLS advertisement. No credential is sent, so this cannot tell a right
+password from a wrong one — it tells "this client can speak this server's
+AUTH" from "it cannot" (e.g. a server offering only `XOAUTH2`).
+|`MSG` |Whether `from`, `to`, `subject` and `content_language`, if set, would
+pass the checks a real send runs before connecting. Checked first, reported
+last, so a local refusal never hides the server's answer. `skipped` when none
+is set.
+|===
+
+A whole-run timeout is reported against the stage in flight, with the usual
+cause for that stage and transport: a TLS stall under `secure: true` suggests
+an implicit-TLS client aimed at a STARTTLS port; a greeting that never comes
+under `secure: starttls` suggests a cleartext client aimed at 465.
+
+`handshake_only: true` remains for canaries that want reachability and TLS
+without the stage report.
+
+== Performance
+
+Measured 2026-09-30, one full delivery per run (greeting through `QUIT`) to the
+same local sink, 100 runs each after three warm-ups:
+
+[cols="2,1,1,1",options="header"]
+|===
+|Program |Wall, median |Wall, p95 |Peak RSS, median
+|smtp-notify (static musl, 0.98 MB) |6.6 ms |8.7 ms |1.4 MiB
+|dawidd6/action-send-mail v22, Node 24 |268.8 ms |319.2 ms |81.2 MiB
+|===
+
+About 40× faster to a delivered message and about 60× less memory. The method,
+the host, the exact versions and the caveats — chiefly that this was a 2-vCPU
+Linux VM, not a GitHub-hosted runner, and that neither action's download is
+included — are in
+link:docs/benchmarks/2026-09-30.adoc[`docs/benchmarks/2026-09-30.adoc`].
+Reproduce with `scripts/benchmark.sh`, or on a real runner with the manually
+dispatched `Benchmark` workflow, which writes the same table to the run
+summary.
 
 == Versioning
 
@@ -201,30 +315,11 @@ always downloads the binary generation it was reviewed with.
   in.
 * link:CHANGELOG.adoc[`CHANGELOG.adoc`] — what changed, and what is on `main` but
   not yet in a released binary.
+* link:docs/benchmarks/2026-09-30.adoc[`docs/benchmarks/`] — published
+  cold-start measurements and how to reproduce them.
 
 == License
 
 MPL-2.0 (`LICENSE`). The vendored `src/tls/Client.zig` derives from the Zig
 standard library and remains MIT © the Zig contributors, as marked in its
 header.
-
-== Accessibility and diagnostics
-
-Messages are deliberately plain text: the action emits no HTML, images, or
-tracking pixels, making the result predictable in screen readers and terminal
-mail clients. `content_language` adds the RFC 5646 `Content-Language` header;
-non-ASCII subjects use RFC 2047 UTF-8 encoded-words.
-
-Set `diagnose: true` for a non-delivery probe. It reports DNS/host parsing,
-TCP connection, TLS, EHLO, and AUTH as distinct stages and never sends
-credentials. `handshake_only` remains available when only reachability and
-TLS are wanted.
-
-== Published benchmark method
-
-`./scripts/benchmark.sh` measures a cold process start with `/usr/bin/time`
-against a local SMTP sink, with network and sink setup held constant. It
-reports elapsed seconds and peak RSS. Run it on the target runner and publish
-the output alongside the Node action comparison; numbers are intentionally not
-invented here, because a benchmark without the runner, binary, and command
-would not be reproducible. The script is the canonical measurement procedure.

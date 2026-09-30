@@ -79,3 +79,30 @@ pub const header_vectors = [_]HeaderVector{
     .{ .input = "bare\nlf", .ok = false },
     .{ .input = "", .ok = true },
 };
+
+/// Content-Language verdicts computed by Smtp.Serialize.contentLanguageOk
+/// (RFC 3282 list of RFC 5646 tags, well-formedness only).
+pub const lang_vectors = [_]HeaderVector{
+    .{ .input = "en", .ok = true },
+    .{ .input = "en-GB", .ok = true },
+    .{ .input = "cy", .ok = true },
+    .{ .input = "zh-Hant-TW", .ok = true },
+    .{ .input = "de-1996", .ok = true },
+    .{ .input = "x-private", .ok = true },
+    .{ .input = "en, cy", .ok = true },
+    .{ .input = "en,cy", .ok = true },
+    .{ .input = " en ", .ok = true },
+    .{ .input = "", .ok = false },
+    .{ .input = "en_GB", .ok = false },
+    .{ .input = "en-", .ok = false },
+    .{ .input = "-en", .ok = false },
+    .{ .input = "en--GB", .ok = false },
+    .{ .input = "en,", .ok = false },
+    .{ .input = "en GB", .ok = false },
+    .{ .input = "12", .ok = false },
+    .{ .input = "toolongtag", .ok = false },
+    .{ .input = "en-abcdefghi", .ok = false },
+    .{ .input = "en\r\nBcc: victim@example.org", .ok = false },
+    .{ .input = "en\nX-Injected: 1", .ok = false },
+    .{ .input = "café", .ok = false },
+};

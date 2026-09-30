@@ -17,7 +17,7 @@ version-specific standard-library defects (see `BUSTFILE.adoc`).
 ```sh
 git clone https://github.com/hyperpolymath/smtp-notify-action.git
 cd smtp-notify-action
-zig build test                                   # the 18 unit tests
+zig build test                                   # unit tests + spec golden vectors
 zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
 ```
 
@@ -58,7 +58,8 @@ follow-up work.
 
 ## Tests, and what counts as one
 
-`zig build test` runs 18 test blocks. Note what they do *not* do: they drive
+`zig build test` runs the unit tests (no count is written here, because a
+written count goes stale — `grep -c '^test ' src/*.zig`). Note what they do *not* do: they drive
 scripted in-memory streams and never open a socket. That is why the CI workflow
 also runs an end-to-end job against a containerised sink and a live TLS handshake
 canary — and why BUST-2026-001, a process abort on any connect timeout, was
@@ -69,6 +70,24 @@ evidence it works.** Say in the PR which instrument you actually used.
 
 A new gate must be able to fail. If you add a check, include the case that makes
 it go red; a check with no recorded failure is decoration until proven otherwise.
+
+## Adding an input
+
+An input in `action.yml` is a promise about the binary that `action.yml`
+downloads. Land a new input **in the release commit** that also bumps the
+asset URL and pins — never on `main` ahead of it. D-011 in
+`KNOWN-DEFECTS.adoc` is what happens otherwise: `diagnose: true` reached a
+binary that ignored it and delivered real mail.
+
+## Pins, `actions.lock`, and why there is no Dependabot
+
+Workflows are pinned through `.github/workflows/actions.lock`, managed by
+`gh actions-lock`, and the lock tool owns pin bumps (standards
+cicd-regularisation design §6.4). There is deliberately no
+`.github/dependabot.yml`: the only ecosystem here that Dependabot could watch
+is `github-actions`, its bump PRs break the lock, and the Zig build has
+`.dependencies = .{}`. Re-run `gh actions-lock` in the same PR as any
+`uses:` change.
 
 ## Pull requests
 

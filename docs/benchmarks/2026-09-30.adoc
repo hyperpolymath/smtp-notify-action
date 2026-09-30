@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: MPL-2.0
+= Cold-start benchmark, 2026-09-30
+:toc: macro
+
+The measurement issue #6 asked for: how long this action's binary takes, from
+process spawn to exit, to deliver one message — against the Node action it
+replaces — and how much memory each needs to do it.
+
+toc::[]
+
+== Result
+
+[cols="3,1,1,1,1",options="header"]
+|===
+|Program |Wall, median |Wall, p95 |Wall, min–max |Peak RSS, median
+|smtp-notify v0.4.0, `x86_64-linux-musl` (979,488 bytes, static)
+|6.6 ms |8.7 ms |5.6–17.8 ms |1.4 MiB
+|dawidd6/action-send-mail v22 (`67ce3558d613`), Node v24.21.0
+|268.8 ms |319.2 ms |239.9–387.1 ms |81.2 MiB
+|===
+
+About 40× less time to a delivered message, about 60× less memory.
+
+== What was measured
+
+* *One full delivery per run*: greeting, EHLO, AUTH PLAIN, MAIL FROM, RCPT TO,
+  DATA, QUIT — the same protocol work on both sides — to a local
+  https://github.com/axllent/mailpit[mailpit] v1.27.0 sink on `127.0.0.1:1025`.
+  Every run was delivered; the sink's count was checked afterwards.
+* *Wall time* from spawn to exit on a nanosecond clock (`date +%s%N` around the
+  process), and *peak RSS* from GNU time `%M`.
+* *100 runs each*, after 3 warm-up runs that are discarded. Raw samples:
+  link:2026-09-30/smtp-notify.samples[`smtp-notify.samples`],
+  link:2026-09-30/dawidd6.samples[`dawidd6.samples`] (microseconds, KiB).
+* The Node action was invoked the way the runner invokes a `node24` action:
+  `node main.js` with inputs as `INPUT_*` environment variables.
+* The smtp-notify binary is byte-identical to the v0.4.0 release asset:
+  SHA-256 `daaa1805ca2e19f743efa124748a597ff3f189074e901772d33b8c136908d56a`,
+  the pin in `action.yml`.
+
+== What was not measured, and why the numbers are not more than they are
+
+* *Host.* A 2-vCPU Linux VM (Intel Xeon @ 2.80 GHz, kernel 6.18), not a
+  GitHub-hosted runner. Absolute times on `ubuntu-latest` will differ; the
+  ratio is the claim. The manual `Benchmark` workflow reruns this on a real
+  runner and writes the same table to the run summary.
+* *Download.* Neither action's download is included. The runner fetches both
+  as repository tarballs; this action additionally `curl`s its release asset
+  (about 1 MB) and checks its SHA-256. That cost depends on the runner's
+  network, not on either program.
+* *A real provider.* A local sink removes network latency, which would
+  dominate both numbers against a remote server and shrink the ratio.
+  This benchmark isolates what each program itself costs.
+* *Node startup is part of the Node number, deliberately*: it is paid on every
+  run of a `node24` action.
+
+== Reproduce
+
+[source,sh]
+----
+zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+mailpit --smtp 127.0.0.1:1025 --smtp-auth-accept-any --smtp-auth-allow-insecure &
+git clone https://github.com/dawidd6/action-send-mail /tmp/dawidd6
+git -C /tmp/dawidd6 checkout 67ce3558d613188179559c61d3565140cf389968
+SMTP_ADDR=127.0.0.1 SMTP_PORT=1025 NODE=/path/to/node24 DAWIDD6_DIR=/tmp/dawidd6 \
+  scripts/benchmark.sh 100
+----

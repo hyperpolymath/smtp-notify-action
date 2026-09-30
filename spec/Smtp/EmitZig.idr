@@ -43,7 +43,16 @@ zigEscChar '"'  = "\\\""
 zigEscChar '\\' = "\\\\"
 zigEscChar '\r' = "\\r"
 zigEscChar '\n' = "\\n"
-zigEscChar c    = pack [c]
+zigEscChar '\t' = "\\t"
+zigEscChar c    =
+  -- Any other control character as \xNN, so a corpus entry holding one
+  -- still generates a valid Zig string literal.
+  if ord c < 0x20 || ord c == 0x7f
+     then "\\x" ++ pack [hexDigit (ord c `div` 16), hexDigit (ord c `mod` 16)]
+     else pack [c]
+  where
+    hexDigit : Int -> Char
+    hexDigit d = if d < 10 then chr (ord '0' + d) else chr (ord 'a' + d - 10)
 
 zigEsc : List Char -> String
 zigEsc cs = concat (map zigEscChar cs)
@@ -69,6 +78,11 @@ headerVectorLine : List Char -> String
 headerVectorLine cs =
   "    .{ .input = \"" ++ zigEsc cs
     ++ "\", .ok = " ++ (if headerValueOk cs then "true" else "false") ++ " },"
+
+langVectorLine : List Char -> String
+langVectorLine cs =
+  "    .{ .input = \"" ++ zigEsc cs
+    ++ "\", .ok = " ++ (if contentLanguageOk cs then "true" else "false") ++ " },"
 
 output : List String
 output =
@@ -130,6 +144,14 @@ output =
   , "pub const header_vectors = [_]HeaderVector{"
   ]
   ++ map headerVectorLine headerCorpus
+  ++
+  [ "};"
+  , ""
+  , "/// Content-Language verdicts computed by Smtp.Serialize.contentLanguageOk"
+  , "/// (RFC 3282 list of RFC 5646 tags, well-formedness only)."
+  , "pub const lang_vectors = [_]HeaderVector{"
+  ]
+  ++ map langVectorLine langCorpus
   ++
   [ "};"
   ]

@@ -8,11 +8,12 @@ match `dawidd6/action-send-mail` exactly; fifteen are absent; and several shared
 names differ in default or in meaning. Read the drift section before switching a
 working workflow.
 
-NOTE: This guide describes *v0.3.0*. The `secure` input changed behaviour in
+NOTE: This guide describes *v0.4.0*. The `secure` input changed behaviour in
 v0.2.0: v0.1.0 treated any unrecognised value as plaintext, v0.2.0 rejects it.
-v0.3.0 adds the STARTTLS submission-port route described below. Pin `@v0.3.0`,
-not `@v0.1.0`, or the behaviour described
-below will not be the behaviour you get.
+v0.3.0 added the STARTTLS submission-port route described below; v0.4.0 adds
+`diagnose`, `content_language` and UTF-8 subjects. Pin `@v0.4.0` (by commit
+SHA), not an older tag, or the behaviour described below will not be the
+behaviour you get.
 
 toc::[]
 
@@ -153,14 +154,23 @@ place where parity with dawidd6 would be a regression.
 Neither action declares an `outputs:` block, so this is parity rather than a
 regression: in both, failure is signalled by a non-zero exit that fails the job.
 
-== Input that is new here
+== Inputs that are new here
 
 [cols="1,3"]
 |===
+|`diagnose` |`true` probes without delivering: DNS, TCP, TLS, EHLO and AUTH
+reported as separate stages, the failing one named. The quickest way to find
+out *why* a migrated step fails — wrong port for the transport, a server that
+does not offer STARTTLS, or an AUTH list with nothing this client can speak.
+|`content_language` |`Content-Language` header, e.g. `en-GB` or `en, cy`.
+dawidd6 has no equivalent input (it would need `headers`).
+|`timeout_seconds` |Whole-run deadline, default 60. dawidd6 has none.
 |`handshake_only` |`true` connects, completes the TLS handshake, sends `EHLO`
 and `QUIT` without sending mail. Use it to prove reachability and TLS
 configuration from a runner without delivering a test message.
 |===
+
+A good first step after switching: run the step once with `diagnose: true`.
 
 == Runner support
 
@@ -198,7 +208,7 @@ failure is now legible, but it is still a failure.
 .After
 [source,yaml]
 ----
-- uses: hyperpolymath/smtp-notify-action@v0.3.0
+- uses: hyperpolymath/smtp-notify-action@<v0.4.0 commit SHA> # v0.4.0
   with:
     server_address: smtp.example.org
     server_port: 465
@@ -212,10 +222,15 @@ failure is now legible, but it is still a failure.
 ----
 
 Only the `uses:` line changes, because this example was already inside the
-nine-input subset and already on implicit TLS.
+nine-input subset and already on implicit TLS. If the port comes from a secret
+that may be 465 or 587, select the transport from it:
+`secure: ${{ secrets.SMTP_PORT == '587' && 'starttls' || 'implicit' }}`.
 
 == What you gain
 
+* *Speed and memory.* A full delivery took a median 6.6 ms and 1.4 MiB here
+  against 268.8 ms and 81.2 MiB for dawidd6 v22 on Node 24 — see
+  `docs/benchmarks/2026-09-30.adoc` for the method and caveats.
 * *No Node runtime.* One static musl binary with `.dependencies = .{}` — zero
   third-party dependencies, so no transitive advisory surface.
 * *The binary is SHA-256 pinned inside `action.yml`*, verified on every run.

@@ -25,7 +25,9 @@ pub const Config = struct {
     from: []const u8,
     recipients: []const []const u8,
     subject: []const u8,
-    /// RFC 5646 language tag for the message (empty omits Content-Language).
+    /// RFC 3282 Content-Language value: one or more RFC 5646 tags,
+    /// comma-separated. Empty omits the header. Anything that fails
+    /// `message.contentLanguageOk` is refused before the session starts.
     content_language: []const u8 = "",
     body: []const u8,
     /// Unix seconds for the Date: header.
@@ -54,6 +56,8 @@ pub const SessionError = error{
     StartTlsUnconfigured, // use_starttls set with no upgrader to call
     StartTlsUpgradeFailed, // the server said 220 and the handshake still failed
     AuthMechanismUnsupported, // server named its mechanisms; none is one we speak
+    ContentLanguageInvalid, // not an RFC 3282 list of RFC 5646 tags — rejected, never repaired
+    SubjectNotUtf8, // non-ASCII subject that is not valid UTF-8 — cannot be labelled honestly
 };
 
 pub const Error = SessionError || std.Io.Reader.DelimiterError || std.Io.Writer.Error;
@@ -185,7 +189,7 @@ pub const Mechanism = enum { plain, login };
 /// Returns null when the server named its mechanisms and none of them is one
 /// we speak. The caller must then fail BEFORE writing a credential: a
 /// mechanism mismatch is not a thing to guess at.
-fn chooseMechanism(caps: *const Capabilities) ?Mechanism {
+pub fn chooseMechanism(caps: *const Capabilities) ?Mechanism {
     // No AUTH line at all. Try PLAIN: this is exactly what shipped on the
     // implicit-TLS path in v0.2.0, and refusing here would break every 465
     // user whose server simply does not enumerate its mechanisms.
@@ -268,6 +272,45 @@ pub const Upgrader = struct {
     }
 };
 
+/// Every check on the message inputs that can be made without a server:
+/// header injection, subject encodability, the Content-Language grammar.
+/// Run by `runSessionDiag` before any byte is written, and by the diagnose
+/// probe so it can say whether a real send would be refused locally.
+pub fn validateMessage(cfg: Config) SessionError!void {
+    if (!message.headerValueOk(cfg.subject)) return error.HeaderInjection;
+    if (!message.subjectEncodable(cfg.subject)) return error.SubjectNotUtf8;
+    if (cfg.content_language.len != 0) {
+        // Injection first, so a CR/LF reports as what it is.
+        if (!message.headerValueOk(cfg.content_language)) return error.HeaderInjection;
+        if (!message.contentLanguageOk(cfg.content_language)) return error.ContentLanguageInvalid;
+    }
+    if (!message.headerValueOk(cfg.from)) return error.HeaderInjection;
+    for (cfg.recipients) |rcpt| {
+        if (!message.headerValueOk(rcpt)) return error.HeaderInjection;
+    }
+}
+
+/// Server words for a log line: multi-line replies joined with " / ", and
+/// every control byte shown as '?'. The result is one line that begins with
+/// our own prefix, so nothing a server (or anyone editing a cleartext
+/// greeting) sends can start a line in the Actions log — where "::" at line
+/// start is a workflow command.
+pub fn sanitizeServerText(out: []u8, text: []const u8) []const u8 {
+    var n: usize = 0;
+    for (text) |c| {
+        if (c == '\n') {
+            if (n + 3 > out.len) break;
+            @memcpy(out[n..][0..3], " / ");
+            n += 3;
+        } else {
+            if (n + 1 > out.len) break;
+            out[n] = if (c < 0x20 or c == 0x7f) '?' else c;
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
 /// Walk the generated script for this transport from .connect to .done,
 /// sending each row's action and demanding a listed reply code before
 /// advancing.
@@ -282,11 +325,7 @@ pub fn runSessionDiag(cfg: Config, wire_in: Wire, diag: ?*Diagnostic) Error!void
     // partway through, and everything after the upgrade — including the
     // courtesy QUIT below — must ride on the new one.
     var wire = wire_in;
-    if (!message.headerValueOk(cfg.subject)) return error.HeaderInjection;
-    if (!message.headerValueOk(cfg.from)) return error.HeaderInjection;
-    for (cfg.recipients) |rcpt| {
-        if (!message.headerValueOk(rcpt)) return error.HeaderInjection;
-    }
+    try validateMessage(cfg);
     if (!cfg.handshake_only and cfg.recipients.len == 0) return error.NoRecipients;
     if (cfg.use_starttls and cfg.upgrader == null) return error.StartTlsUnconfigured;
 
@@ -540,19 +579,20 @@ fn writePayload(cfg: Config, w: *std.Io.Writer) Error!void {
     }
     try w.writeAll("\r\n");
     try w.writeAll("Subject: ");
-    // RFC 2047 encoded-word keeps non-ASCII subjects valid RFC 5322 headers.
-    // ASCII subjects remain readable and byte-for-byte compatible.
-    var ascii_subject = true;
-    for (cfg.subject) |c| if (c >= 0x80) { ascii_subject = false; break; };
-    if (ascii_subject) {
-        try w.writeAll(cfg.subject);
-    } else {
-        var encoded: [2048]u8 = undefined;
-        const n = std.base64.standard.Encoder.encode(&encoded, cfg.subject);
-        try w.print("=?UTF-8?B?{s}?=", .{encoded[0..n]});
-    }
+    // ASCII is byte-for-byte what earlier releases sent; non-ASCII becomes
+    // folded RFC 2047 encoded-words. Validity was checked before the
+    // session started, so the error arm here is defence in depth.
+    message.writeSubjectValue(w, "Subject: ".len, cfg.subject) catch |err| switch (err) {
+        error.SubjectNotUtf8 => return error.SubjectNotUtf8,
+        error.WriteFailed => return error.WriteFailed,
+    };
     try w.writeAll("\r\n");
-    if (cfg.content_language.len != 0) try w.print("Content-Language: {s}\r\n", .{cfg.content_language});
+    // Validated against the spec's grammar before the session started.
+    if (cfg.content_language.len != 0) {
+        try w.writeAll("Content-Language: ");
+        try message.writeContentLanguage(w, cfg.content_language);
+        try w.writeAll("\r\n");
+    }
     try w.writeAll("Date: ");
     try message.writeRfc5322Date(w, cfg.date_epoch_seconds);
     try w.writeAll("\r\n");
@@ -1242,4 +1282,77 @@ test "AUTH LOGIN: a rejection of the verb itself sends no credential at all" {
     try std.testing.expect(std.mem.indexOf(u8, sent, "dQ==") == null);
     try std.testing.expect(std.mem.indexOf(u8, sent, "cA==") == null);
     try std.testing.expectEqual(@as(u16, 504), diag.code);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #6: Content-Language and RFC 2047 at the session boundary.
+// ---------------------------------------------------------------------------
+
+const happy_replies =
+    "220 mail.example.org ESMTP\r\n" ++
+    "250-mail.example.org\r\n250 AUTH PLAIN\r\n" ++
+    "235 ok\r\n" ++
+    "250 ok\r\n" ++ // MAIL FROM
+    "250 ok\r\n" ++ // RCPT TO (one recipient)
+    "354 go\r\n" ++
+    "250 queued\r\n" ++
+    "221 bye\r\n";
+
+test "Content-Language: a CR/LF value is rejected before any byte reaches the wire" {
+    var cfg = test_cfg;
+    cfg.content_language = "en\r\nBcc: victim@example.org";
+    var r: std.Io.Reader = .fixed(happy_replies);
+    var out: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try std.testing.expectError(error.HeaderInjection, runSession(cfg, .{ .r = &r, .w = &w }));
+    try std.testing.expectEqual(@as(usize, 0), w.end);
+}
+
+test "Content-Language: a malformed tag is rejected, not repaired" {
+    var cfg = test_cfg;
+    cfg.content_language = "en_GB";
+    var r: std.Io.Reader = .fixed(happy_replies);
+    var out: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try std.testing.expectError(error.ContentLanguageInvalid, runSession(cfg, .{ .r = &r, .w = &w }));
+    try std.testing.expectEqual(@as(usize, 0), w.end);
+}
+
+test "Content-Language: a valid list is emitted as one header; empty emits none" {
+    var out: [8192]u8 = undefined;
+    var cfg = test_cfg;
+    cfg.recipients = &.{"one@example.com"};
+    cfg.content_language = " en-GB ,cy";
+    const n = try runScripted(cfg, happy_replies, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "\r\nContent-Language: en-GB, cy\r\n") != null);
+
+    cfg.content_language = "";
+    const m = try runScripted(cfg, happy_replies, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..m], "Content-Language") == null);
+}
+
+test "Subject: non-ASCII goes out as encoded-words; the raw bytes never do" {
+    var out: [8192]u8 = undefined;
+    var cfg = test_cfg;
+    cfg.recipients = &.{"one@example.com"};
+    cfg.subject = "Gwthio i'r brif gangen — ŵ";
+    const n = try runScripted(cfg, happy_replies, &out);
+    const sent = out[0..n];
+    try std.testing.expect(std.mem.indexOf(u8, sent, "\r\nSubject: =?UTF-8?B?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "ŵ") == null);
+}
+
+test "sanitizeServerText: one line, no control bytes" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("a / ::warning x / b?c", sanitizeServerText(&buf, "a\n::warning x\nb\x1bc"));
+}
+
+test "Subject: invalid UTF-8 is refused before any byte reaches the wire" {
+    var cfg = test_cfg;
+    cfg.subject = "bad \xff byte";
+    var r: std.Io.Reader = .fixed(happy_replies);
+    var out: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    try std.testing.expectError(error.SubjectNotUtf8, runSession(cfg, .{ .r = &r, .w = &w }));
+    try std.testing.expectEqual(@as(usize, 0), w.end);
 }

@@ -24,7 +24,8 @@ defects instead of waiting to be asked about them.
 
 | Version | Supported |
 |---|---|
-| `v0.3.0` | Yes — current release |
+| `v0.4.0` | Yes — current release |
+| `v0.3.0` | No — superseded; `action.yml` of commits after it and before v0.4.0 offers inputs its binary ignores (D-011) |
 | `v0.2.0` | No — superseded; implicit TLS only, no STARTTLS |
 | `v0.1.0` | No — superseded; `secure` fails open |
 | `main` | No — not a release; during a release window it names assets that are not published yet |
@@ -42,8 +43,9 @@ properties of this action:
 
 1. **It is 91 KB — about 69% of all Zig source in this repository.** The majority
    of the code you run is TLS code this project did not write.
-2. **It has no tests of its own.** All 18 test blocks live in `src/smtp.zig` (15)
-   and `src/message.zig` (3). `Client.zig` has zero.
+2. **It has no tests of its own.** Every unit test lives in `src/smtp.zig` and
+   `src/message.zig` (count them with `grep -c '^test ' src/*.zig`).
+   `Client.zig` has zero.
 3. **It is outside the proof boundary.** The Idris2 specification covers
    dot-stuffing (a theorem over all inputs) and the protocol state machine (a
    `Refl` proof over the eight rows that exist). TLS is explicitly *not covered
@@ -75,6 +77,14 @@ Vendoring also means an upstream fix does **not** reach you automatically.
   you pin therefore determines the exact bytes that run.
 - **CR/LF in headers is rejected, never sanitised.** Header injection fails the
   step instead of being silently repaired into something the caller did not write.
+  `content_language` is additionally held to a language-tag grammar; its
+  acceptance predicate is that grammar *and* the injection check, and the
+  theorem `contentLanguageNoInjection` pins that conjunction.
+- **Server text never starts a log line.** Replies are folded onto our own
+  prefixed line with control bytes replaced, so a server — or anyone editing a
+  cleartext greeting — cannot inject a `::` workflow command.
+- **`diagnose` never authenticates or sends.** It stops before AUTH and reports
+  which mechanism *would* be used. CI asserts the sink is empty afterwards.
 
 ## Known limitations with security relevance
 
