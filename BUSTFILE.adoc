@@ -43,8 +43,11 @@ toc::[]
 
 |Component |Zig standard library, `std.Io`, version 0.16.0
 |Discovered |2026-09-03, by running the built binary against a local listener
-|Upstream |https://github.com/ziglang/zig/issues/25747[ziglang/zig#25747] (open,
-labelled `enhancement`, filed 2025-10-29 by the Zig lead)
+|Upstream |https://github.com/ziglang/zig/issues/25747[ziglang/zig#25747] (GitHub,
+frozen read-only since Zig moved to Codeberg on 2025-11-26). Fix in review as
+https://codeberg.org/ziglang/zig/pulls/36488[codeberg ziglang/zig#36488]
+("migrate netConnectIp … to std.Io.Operation", opened 2026-08-13, "Closes
+#25747"; open as of 2026-09-30)
 |Our disposition |*Level 1 — Eliminate*
 |Status |Worked around; no residual exposure
 |===
@@ -93,19 +96,26 @@ This is the same defect shape as BUST-2026-002, and the pair of them is the
 lesson worth carrying: in this standard library, *an error set is a claim about
 what may be returned, never evidence that anything returns it*.
 
-=== Upstream report — prepared, blocked
+=== Upstream report — where it goes now
 
 Upstream #25747 names only the two `Threaded` guards. The `Kqueue` site, the
 five-provider survey, and the `ConnectError` observation above are not recorded
 there.
 
-A comment carrying them is written and ready at
-link:docs/upstream/ziglang-zig-25747.md[`docs/upstream/ziglang-zig-25747.md`],
-*but it could not be posted*: as of 2026-09-03 `ziglang/zig` restricts
-interactions to collaborators, which blocks both commenting and opening an
-issue from a non-collaborator account. The limit's expiry is not readable from
-outside (the endpoint is admin-only). Retry instructions are in that file. This
-is a moderation control and is not to be worked around.
+The earlier diagnosis of why the prepared comment could not be posted was
+wrong. It was read (2026-09-03) as a collaborators-only interaction limit, and
+the retry plan was to re-run `gh issue comment` until it lifted. It will never
+lift: Zig moved development to Codeberg on 2025-11-26 and made the GitHub
+repository read-only, leaving its issues open but frozen
+(https://ziglang.org/news/migrating-from-github-to-codeberg/). Re-checked
+2026-09-30.
+
+The fix itself is already in review on Codeberg as #36488, which states it
+closes #25747. The observations above are therefore best offered as a review
+comment on that PR — in particular the `Kqueue` guard, which a fix scoped to
+`Threaded` would leave in place. The text is ready at
+link:docs/upstream/ziglang-zig-25747.md[`docs/upstream/ziglang-zig-25747.md`];
+posting needs a Codeberg account.
 
 === Why it was not caught earlier
 
@@ -200,8 +210,8 @@ at run time.
 
 === Re-check trigger
 
-When ziglang/zig#25747 closes *and* this repository moves to a Zig release
-containing the fix, reconsider — but only on merit. The watchdog is likely to
+When Codeberg ziglang/zig#36488 (or its successor) merges *and* this
+repository moves to a Zig release containing it, reconsider — but only on merit. The watchdog is likely to
 remain the better mechanism regardless, because it is the only one of the two
 that bounds reads and writes. Do not restore the connect timeout simply because
 it became available.
@@ -252,3 +262,85 @@ entry should be revisited before this code is reused in one.
 A Zig release in which `Stream.Reader` gains a real deadline field that the
 socket read path honours. Verify by running a probe against a silent listener
 before believing it — the error set will look the same either way.
+
+== BUST-2026-003 — Zig's TLS client cannot answer a CertificateRequest
+
+[cols="1,3"]
+|===
+|Component |Zig standard library, `std.crypto.tls.Client`, version 0.16.0
+|Discovered |2026-08, against `smtp.gmail.com:465`, which requests a client
+certificate during the TLS 1.3 handshake
+|Upstream |https://github.com/ziglang/zig/issues/19521[ziglang/zig#19521]
+(GitHub, frozen); reported afresh on Codeberg as
+https://codeberg.org/ziglang/zig/issues/36098[#36098] ("TlsUnexpectedMessage on
+TLSv1.3", open as of 2026-09-30, diagnosed there as the same missing message)
+|Our disposition |*Level 2 — Substitute*: a vendored copy of the 0.16.0 client
+with one patch
+|Status |Worked around; residual risk stated below
+|===
+
+=== Symptom
+
+A server that sends `CertificateRequest` — legal, and common among large mail
+providers — makes the std client fail the handshake with
+`TlsUnexpectedMessage`, before any SMTP is spoken.
+
+=== Disposition — Level 2, Substitute
+
+`src/tls/Client.zig` is the 0.16.0 std client, verbatim except for regions
+marked `PATCH(#19521)`: the request is accepted and answered with an empty
+`Certificate` message, as RFC 8446 §4.4.2 prescribes for a client with no
+certificate. The live canary in CI (`smtp.gmail.com:465`) exercises it on every
+push.
+
+*Residual risk*: an upstream security fix to the TLS client does not reach
+this binary until the file is re-vendored; the file has no tests of its own
+(D-008). Both are stated in `.github/SECURITY.md`.
+
+=== Upstream contribution — prepared
+
+The patch is small, self-contained and already field-tested; it is offered to
+Codeberg #36098 in
+link:docs/upstream/codeberg-zig-36098.md[`docs/upstream/codeberg-zig-36098.md`].
+Posting needs a Codeberg account.
+
+=== Re-check trigger
+
+A Zig release whose `std.crypto.tls.Client` handles `certificate_request`.
+Verify with the gmail:465 canary against the *unpatched* std client before
+deleting `src/tls/Client.zig`.
+
+== BUST-2026-004 — `HostName.connect` stalls when a name has 32 or more addresses
+
+[cols="1,3"]
+|===
+|Component |Zig standard library, `std.Io.net.HostName.connect` / `connectMany`, version 0.16.0
+|Discovered |2026-09-30, by independent review of the diagnose stage: a name
+with 32 `/etc/hosts` entries never connected; 31 did
+|Upstream |Not yet reported
+|Our disposition |*Level 3 — Engineering control* (the whole-run watchdog)
+|Status |Bounded, not removed; residual risk stated below
+|===
+
+=== Symptom
+
+`connectMany` resolves into a fixed 32-slot queue. With 32 or more results
+the resolver fills the queue and blocks, and no connection attempt completes,
+so `connect` waits indefinitely instead of returning the first success.
+
+=== Disposition — Level 3
+
+The watchdog bounds the run: the step fails at `timeout_seconds` rather than
+holding the runner. The diagnose DNS stage no longer shares the hazard — it
+resolves concurrently with draining its queue — so a name with many addresses
+now shows `DNS ok` followed by a `TCP` timeout, which points at the right
+place.
+
+*Residual risk*: a mail host publishing 32+ A/AAAA records cannot be reached
+by this action. No mainstream submission endpoint does.
+
+=== Re-check trigger
+
+A Zig release whose `connectMany` drains lookup results concurrently or sizes
+its queue from them. Verify with 40 `/etc/hosts` entries for one name before
+removing this entry.

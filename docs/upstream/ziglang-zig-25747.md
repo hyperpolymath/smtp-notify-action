@@ -5,27 +5,25 @@
 This file is Markdown rather than AsciiDoc on purpose: it is the verbatim body
 of a GitHub comment, and GitHub comments are Markdown. Paste it unchanged.
 
-**Status: not yet posted.** `ziglang/zig` currently restricts interactions to
-collaborators, so a non-collaborator account cannot comment on the issue or
-open one:
+**Status: not yet posted — and the original target no longer accepts
+comments, for a different reason than first recorded.**
 
-```
-$ gh issue comment 25747 -R ziglang/zig --body-file …
-GraphQL: could not be created. Interactions on this repository have been
-restricted to collaborators only. (addComment)
-```
+The 2026-09-03 attempt failed with "Interactions on this repository have been
+restricted to collaborators only". That was read as a temporary interaction
+limit. It is not: Zig moved to Codeberg on 2025-11-26 and made
+`ziglang/zig` on GitHub read-only, leaving existing issues open but frozen
+("copy-on-write"; https://ziglang.org/news/migrating-from-github-to-codeberg/).
 
-Checked 2026-09-03. The expiry cannot be read from outside — the
-`/interaction-limits` endpoint is admin-only and returns 403 — and GitHub's
-interaction limits may be temporary (24 hours to 6 months) or indefinite.
+**Where to post instead (re-checked 2026-09-30):** the fix is in review on
+Codeberg as **ziglang/zig#36488**, "std.Io: migrate netConnectIp and
+netConnectUnix to std.Io.Operation" (opened 2026-08-13, "Closes #25747 #31410
+#31305"). Post the text below as a comment on that PR, reframed as review
+input: the most useful part for the reviewer is the `Kqueue.zig` guard, which
+a change scoped to `Threaded.zig` would leave behind. Posting needs a Codeberg
+account; nothing here can do it on the owner's behalf.
 
-**Retry trigger:** re-run the `gh issue comment` above periodically. When it
-succeeds, delete this file and record the comment URL in `BUSTFILE.adoc` under
-BUST-2026-001. Do not work around the restriction; it is a moderation control.
-
-**If it stays closed:** the content below is worth contributing through the
-Zig community forum (ziggit.dev) instead, where it can be linked from the
-issue by someone who can comment on it.
+When it is posted, record the comment URL in `BUSTFILE.adoc` under
+BUST-2026-001 and delete this file.
 
 ---
 

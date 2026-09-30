@@ -1,0 +1,78 @@
+# This workflow is managed by gh actions-lock.
+# SPDX-License-Identifier: MPL-2.0
+# This workflow is managed by gh actions-lock.
+#
+# Cold-start benchmark on a GitHub-hosted runner: this action's release
+# binary against dawidd6/action-send-mail, each delivering to the same local
+# mailpit sink. Manual only — a benchmark is evidence for a claim, not a gate,
+# and running it on every push would only add noise to the run list.
+# The table lands in the run summary; copy it into docs/benchmarks/ to publish.
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: 'Runs per program'
+        required: false
+        default: '100'
+
+permissions:
+  contents: read
+
+env:
+  ZIG_TARBALL: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+  # The comparison target, pinned by commit: the tag the estate last used.
+  DAWIDD6_SHA: 67ce3558d613188179559c61d3565140cf389968 # v22 (node24)
+  NODE_VERSION: v24.21.0
+
+jobs:
+  benchmark:
+    name: Cold start vs Node action
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mailpit:
+        image: axllent/mailpit@sha256:e22dce5b36f93c77082e204a3942fb6b283b7896e057458400a4c88344c3df68 # v1.27
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: 1
+          MP_SMTP_AUTH_ALLOW_INSECURE: 1
+        ports:
+          - 1025:1025
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Zig 0.16.0 (sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zig.tar.xz "$ZIG_TARBALL"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig-toolchain"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-toolchain" --strip-components=1
+          echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
+      - name: Build the shipped binary shape (static musl, ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+      - name: Fetch Node 24 (checksum-verified) and the comparison action
+        run: |
+          set -euo pipefail
+          base="https://nodejs.org/dist/${NODE_VERSION}"
+          tarball="node-${NODE_VERSION}-linux-x64.tar.xz"
+          curl -fsSL -o "/tmp/${tarball}" "${base}/${tarball}"
+          curl -fsSL "${base}/SHASUMS256.txt" | grep " ${tarball}\$" | (cd /tmp && sha256sum -c -)
+          mkdir -p "$HOME/node24"
+          tar -xJf "/tmp/${tarball}" -C "$HOME/node24" --strip-components=1
+          git init -q "$HOME/dawidd6"
+          git -C "$HOME/dawidd6" fetch -q --depth 1 https://github.com/dawidd6/action-send-mail.git "$DAWIDD6_SHA"
+          git -C "$HOME/dawidd6" checkout -q FETCH_HEAD
+      - name: Run
+        env:
+          SMTP_ADDR: 127.0.0.1
+          SMTP_PORT: '1025'
+          BIN: zig-out/bin/smtp-notify
+          RUNS: ${{ inputs.runs }}
+        run: |
+          set -euo pipefail
+          case "$RUNS" in ''|*[!0-9]*) echo "runs must be a whole number" >&2; exit 1;; esac
+          sudo apt-get update -q >/dev/null && sudo apt-get install -y -q time >/dev/null
+          NODE="$HOME/node24/bin/node" DAWIDD6_DIR="$HOME/dawidd6" \
+            scripts/benchmark.sh "$RUNS" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -75,6 +75,68 @@ jobs:
           echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
       - name: Build
         run: zig build -Doptimize=ReleaseSafe
+      - name: Diagnose delivers nothing and reports every stage
+        # diagnose must never authenticate or send, even with a full mail
+        # configuration present. The sink must still be empty afterwards.
+        env:
+          SMTP_ADDR: localhost
+          SMTP_PORT: '1025'
+          SMTP_SECURE: 'plaintext'
+          SMTP_DIAGNOSE: 'true'
+          SMTP_USER: ci
+          SMTP_PASS: ci
+          MAIL_FROM: CI <ci@example.test>
+          MAIL_TO: sink@example.test
+          MAIL_SUBJECT: 'must not arrive'
+          MAIL_BODY: 'must not arrive'
+        run: |
+          set -euo pipefail
+          out="$(./zig-out/bin/smtp-notify 2>&1)"
+          echo "$out"
+          for stage in DNS TCP TLS EHLO AUTH MSG; do
+            echo "$out" | grep -Eq "diagnose: ${stage} +(ok|skipped) " || { echo "stage ${stage} not reported ok" >&2; exit 1; }
+          done
+          count="$(curl -fsS http://localhost:8025/api/v1/messages | jq -er '.total')"
+          [ "$count" = "0" ] || { echo "diagnose delivered $count message(s)" >&2; exit 1; }
+      - name: Diagnose names the failing stage (nothing listening)
+        env:
+          SMTP_ADDR: localhost
+          SMTP_PORT: '1026'
+          SMTP_SECURE: 'plaintext'
+          SMTP_DIAGNOSE: 'true'
+        run: |
+          set -euo pipefail
+          if out="$(./zig-out/bin/smtp-notify 2>&1)"; then
+            echo "diagnose against a closed port exited 0" >&2; exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -q 'diagnose: TCP  FAIL' || { echo "TCP failure not attributed" >&2; exit 1; }
+          echo "$out" | grep -q 'diagnose: EHLO not-reached' || { echo "later stages not marked" >&2; exit 1; }
+      - name: Malformed or injecting Content-Language is refused before sending
+        env:
+          SMTP_ADDR: localhost
+          SMTP_PORT: '1025'
+          SMTP_SECURE: 'plaintext'
+          SMTP_USER: ci
+          SMTP_PASS: ci
+          MAIL_FROM: CI <ci@example.test>
+          MAIL_TO: sink@example.test
+          MAIL_SUBJECT: 'must not arrive'
+          MAIL_BODY: 'must not arrive'
+        run: |
+          set -euo pipefail
+          # Each refusal must be THE refusal, not any non-zero exit.
+          check() { # $1 value, $2 expected message fragment
+            if out="$(MAIL_CONTENT_LANGUAGE="$1" ./zig-out/bin/smtp-notify 2>&1)"; then
+              echo "accepted Content-Language: $(printf %q "$1")" >&2; exit 1
+            fi
+            echo "$out"
+            echo "$out" | grep -qF "$2" || { echo "refused for the wrong reason" >&2; exit 1; }
+          }
+          check 'en_GB' 'MAIL_CONTENT_LANGUAGE is not a comma-separated list'
+          check $'en\r\nBcc: victim@example.test' 'CR/LF in a header-bound input'
+          count="$(curl -fsS http://localhost:8025/api/v1/messages | jq -er '.total')"
+          [ "$count" = "0" ] || { echo "a refused message was delivered" >&2; exit 1; }
       - name: Deliver a mail with a dot-stuffing hazard in the body
         env:
           SMTP_ADDR: localhost
@@ -84,7 +146,8 @@ jobs:
           SMTP_PASS: ci
           MAIL_FROM: CI <ci@example.test>
           MAIL_TO: sink@example.test
-          MAIL_SUBJECT: 'smtp-notify e2e'
+          MAIL_SUBJECT: 'smtp-notify e2e — ŵ 🎉 — a subject long enough to fold onto continuation lines, in Welsh: Llongyfarchiadau ar wthio i’r brif gangen'
+          MAIL_CONTENT_LANGUAGE: ' en-GB ,cy'
           MAIL_BODY: |
             line one
             .a line starting with a dot must survive stuffing
@@ -105,8 +168,15 @@ jobs:
             echo "$raw" >&2
             exit 1
           }
-          echo "$raw" | grep -q '^Subject: smtp-notify e2e' || { echo "subject missing" >&2; exit 1; }
-          echo "e2e ok: delivered, dot-stuffing round-tripped"
+          # The raw header must be an encoded-word (no 8-bit bytes in the
+          # header), and the sink's own decoding must give the text back.
+          echo "$raw" | grep -q '^Subject: =?UTF-8?B?' || { echo "subject not RFC 2047 encoded" >&2; exit 1; }
+          subject="$(curl -fsS http://localhost:8025/api/v1/messages | jq -er '.messages[0].Subject')"
+          [ "$subject" = 'smtp-notify e2e — ŵ 🎉 — a subject long enough to fold onto continuation lines, in Welsh: Llongyfarchiadau ar wthio i’r brif gangen' ] || { echo "subject decoded as: $subject" >&2; exit 1; }
+          echo "$raw" | grep -qx 'Content-Language: en-GB, cy' || { echo "Content-Language missing" >&2; exit 1; }
+          # RFC 2047 §2: a line carrying an encoded-word is at most 76 chars.
+          echo "$raw" | awk '/=\?UTF-8\?B\?/ && length($0) > 76 { bad = 1; print "over 76: " $0 } END { exit bad }' >&2
+          echo "e2e ok: delivered, dot-stuffing round-tripped, subject and language intact"
 
   tls-handshake:
     # Live canary for the vendored TLS client (certificate_request patch,
@@ -134,4 +204,11 @@ jobs:
           SMTP_SECURE: 'true'
           SMTP_ADDR: smtp.gmail.com
           SMTP_PORT: '465'
+        run: ./zig-out/bin/smtp-notify
+      - name: Diagnose probe, STARTTLS on 587 (no auth, nothing sent)
+        env:
+          SMTP_DIAGNOSE: 'true'
+          SMTP_SECURE: 'starttls'
+          SMTP_ADDR: smtp.gmail.com
+          SMTP_PORT: '587'
         run: ./zig-out/bin/smtp-notify

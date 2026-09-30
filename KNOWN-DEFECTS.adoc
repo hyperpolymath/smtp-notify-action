@@ -153,6 +153,47 @@ untested surface in the repository and it is the security-critical one.
 |Open
 |Tracked in the issue tracker
 
+|D-010
+|PR #20 (merged 2026-09-29, never released) added `content_language`,
+RFC 2047 subjects and `diagnose`, and got all three wrong: the
+Content-Language value went into the header *unvalidated* — a CR/LF
+header-injection path, contradicting this project's "rejected, never
+sanitized" rule; the subject encoder base64'd into a fixed 2048-byte buffer
+(a subject over 1536 bytes overflowed it), ignored the 75-character
+encoded-word limit, and did not compile; and `diagnose` printed
+`DNS=ok … TCP=pending` without testing anything. It merged with four of
+eleven checks failing.
+|High (had it shipped)
+|Fixed before any release, in v0.4.0. Content-Language is validated against a
+grammar in the Idris2 spec with a no-injection theorem; the encoder streams
+through a fixed 60-byte scratch with folding and code-point-safe chunking;
+`diagnose` performs and reports each stage. Merging with failing required
+checks is a repository-settings problem, recorded in the issue tracker.
+|https://github.com/hyperpolymath/smtp-notify-action/issues/6[#6]
+
+|D-011
+|Between PR #20 and v0.4.0, `action.yml` on `main` declared `diagnose` and
+`content_language` but still downloaded the v0.3.0 binary, which ignores both
+variables. A workflow pinned to such a commit with `diagnose: true` believed
+it was probing; it authenticated with the real credential and delivered a
+message (reproduced 2026-09-30 against a local sink). `main` is documented as
+unsupported, which limited exposure; the estate sweep of 2026-09-30 found no
+workflow pinned to an affected commit.
+|Medium
+|Fixed in v0.4.0: `action.yml` and the binary it downloads now agree. The
+general lesson — an input added to `action.yml` is a promise about a binary
+that does not exist until release — is why inputs now land in the release
+commit, never before it.
+|https://github.com/hyperpolymath/smtp-notify-action/issues/6[#6]
+
+|D-012
+|Non-ASCII in a `from` display name is sent as raw 8-bit bytes in the header
+rather than RFC 2047 encoded. Most receivers cope (SMTPUTF8 era), but it is
+not strictly RFC 5322.
+|Low
+|Open
+|Tracked in the issue tracker
+
 |D-009
 |No retry or backoff. A transient `4xx` fails the step immediately rather than
 being retried. Loud, which is the house preference, but a transient network
@@ -190,8 +231,16 @@ claim belongs in the defect register rather than only in the README.
   the table still owns is the part that decides the outcome — the terminal
   reply is checked against `235` exactly as before. Mechanism selection and
   the challenge loop are covered by tests, not by a theorem.
-* *Corpus only, no theorem*: header-value validation is covered by golden
-  vectors. An injection vector outside the corpus is not excluded by proof.
+* *Universally quantified, but structural*: `contentLanguageNoInjection` —
+  every value `contentLanguageOk` accepts also passes `headerValueOk`. It holds
+  because the acceptance predicate is stated as a conjunction including the
+  injection check; its value is that removing that conjunct breaks the build.
+* *Corpus only, no theorem*: `headerValueOk` itself, and the Content-Language
+  tag grammar, are covered by spec-evaluated golden vectors. An injection
+  vector outside the corpus is not excluded by proof for `from`, `to` or
+  `subject`.
+* *Tests only*: RFC 2047 subject encoding (round-trip, 75-character and
+  code-point-boundary tests in `src/message.zig`). Not in the spec.
 * *Not covered at all*: TLS (D-008), the network layer, and the installer.
 
 The Idris2 layer is a specification and code generator. It does not ship in the

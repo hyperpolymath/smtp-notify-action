@@ -3,6 +3,8 @@
 # Docs: https://gh.io/actions-lockfile
 version: 'v0.0.2'
 workflows:
+    '.github/workflows/benchmark.yml':
+        - 'actions/checkout@v7.0.1'
     '.github/workflows/ci.yml':
         - 'actions/checkout@v7.0.1'
     '.github/workflows/release.yml':
