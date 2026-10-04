@@ -48,6 +48,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Regenerate from the proven spec and diff (with selftest)
+        # `shell: bash` is not decoration: this job runs inside a container,
+        # where the runner's default shell is `sh`. The previous version of
+        # this step died with exit 2 on bash-only syntax before it could
+        # report anything, which is precisely the failure mode it exists to
+        # avoid.
+        shell: bash
         # A job log needs a signed-in session, so a failure here reaches
         # `gh api .../check-runs/<id>/annotations` but not an unauthenticated
         # reader or an agent triaging the PR. Mirror the output into
