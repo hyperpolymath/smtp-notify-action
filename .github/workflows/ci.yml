@@ -48,7 +48,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Regenerate from the proven spec and diff (with selftest)
-        run: bash scripts/check-fsm-drift.sh --selftest
+        # A job log needs a signed-in session, so a failure here reaches
+        # `gh api .../check-runs/<id>/annotations` but not an unauthenticated
+        # reader or an agent triaging the PR. Mirror the output into
+        # annotations as well: a gate whose reason cannot be read is a gate
+        # that gets re-run hopefully instead of fixed.
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          if bash scripts/check-fsm-drift.sh --selftest >"$log" 2>&1; then
+            cat "$log"
+          else
+            status=$?
+            cat "$log"
+            while IFS= read -r line; do
+              printf '::error::%s\n' "${line//\%/%25}"
+            done < <(head -n 45 "$log")
+            exit "$status"
+          fi
 
   action-metadata:
     name: action.yml metadata gate (Marketplace)
