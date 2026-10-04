@@ -245,7 +245,7 @@ nCodeOk : Nat -> Bool
 nCodeOk c = (200 <= c && c < 300) || c == 101 || c == 340 || c == 382
 
 nRowCodesOk : NStep -> Bool
-nRowCodesOk s = nAllSteps nCodeOk (nexpect s)
+nRowCodesOk s = all nCodeOk (nexpect s)
 
 ||| Reply-code discipline: no row accepts a 4xx or 5xx as success, each of the
 ||| three intermediate codes occurs at the row that owns it, and the article
