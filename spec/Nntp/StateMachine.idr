@@ -247,28 +247,44 @@ nCodeOk c = (200 <= c && c < 300) || c == 101 || c == 340 || c == 382
 nRowCodesOk : NStep -> Bool
 nRowCodesOk s = all nCodeOk (nexpect s)
 
-||| Reply-code discipline: no row accepts a 4xx or 5xx as success, each of the
-||| three intermediate codes occurs at the row that owns it, and the article
-||| is accepted (240) exactly once per session.
+||| Reply-code discipline, part one: no row of either shape accepts a 4xx or
+||| 5xx as success.
+export
+nCodesAreSuccesses :
+  ( nAllSteps nRowCodesOk nScriptImplicit
+  , nAllSteps nRowCodesOk nScriptStartTls
+  ) = (True, True)
+nCodesAreSuccesses = Refl
+
+||| Reply-code discipline, part two: each of the three intermediate codes
+||| occurs at the row that owns it, and the article is accepted (240) exactly
+||| once per session.
 |||
+||| Split into one property per shape rather than one long conjunction: a
+||| ten-element tuple type exceeds the elaborator's ambiguity depth and is
+||| rejected outright (found by the first real run of the drift gate), and a
+||| property per shape also says which session broke when one does.
+export
+nCodesLocatedImplicit :
+  ( nCountCode 101 nScriptImplicit == 1
+  , nCountCode 382 nScriptImplicit == 0
+  , nCountCode 340 nScriptImplicit == 1
+  , nCountCode 240 nScriptImplicit == 1
+  ) = (True, True, True, True)
+nCodesLocatedImplicit = Refl
+
 ||| 101 appears twice in the STARTTLS shape on purpose — before the upgrade
 ||| and after it — and once in the implicit shape. A table that dropped the
 ||| post-upgrade row would fail this conjunct, which is the point: it is the
 ||| row that makes the second advertisement mandatory.
 export
-nCodesDisciplined :
-  ( nAllSteps nRowCodesOk nScriptImplicit
-  , nAllSteps nRowCodesOk nScriptStartTls
-  , nCountCode 101 nScriptImplicit == 1
-  , nCountCode 382 nScriptImplicit == 0
-  , nCountCode 340 nScriptImplicit == 1
-  , nCountCode 240 nScriptImplicit == 1
-  , nCountCode 101 nScriptStartTls == 2
+nCodesLocatedStartTls :
+  ( nCountCode 101 nScriptStartTls == 2
   , nCountCode 382 nScriptStartTls == 1
   , nCountCode 340 nScriptStartTls == 1
   , nCountCode 240 nScriptStartTls == 1
-  ) = (True, True, True, True, True, True, True, True, True, True)
-nCodesDisciplined = Refl
+  ) = (True, True, True, True)
+nCodesLocatedStartTls = Refl
 
 nRowDoesNotRepeat : NStep -> Bool
 nRowDoesNotRepeat s = not (nrepeats s)
@@ -284,20 +300,21 @@ nNoRepeats :
 nNoRepeats = Refl
 
 ||| Wire-order soundness, stated on the phase index and so true of any table
-||| that respects it: the capability list precedes the upgrade, the upgrade
-||| precedes the re-advertisement, the re-advertisement precedes AUTHINFO,
-||| AUTHINFO precedes POST (no unauthenticated article), and POST precedes
-||| the article itself.
-|||
-||| The first four conjuncts are what forbid the dangerous orderings: posting
-||| before authenticating, or authenticating on a cleartext wire.
+||| that respects it. Split in two for the elaborator's depth limit, along the
+||| line that matters: the upgrade half forbids authenticating on a cleartext
+||| wire, and the article half forbids posting before authenticating.
 export
-nOrderingSound :
+nOrderingSoundUpgrade :
   ( nPhaseIndex NCapabilities < nPhaseIndex NStartTls
   , nPhaseIndex NStartTls     < nPhaseIndex NCapsTls
   , nPhaseIndex NCapsTls      < nPhaseIndex NAuth
-  , nPhaseIndex NAuth         < nPhaseIndex NPost
-  , nPhaseIndex NPost         < nPhaseIndex NPayload
-  , nPhaseIndex NPayload      < nPhaseIndex NQuit
-  ) = (True, True, True, True, True, True)
-nOrderingSound = Refl
+  ) = (True, True, True)
+nOrderingSoundUpgrade = Refl
+
+export
+nOrderingSoundArticle :
+  ( nPhaseIndex NAuth    < nPhaseIndex NPost
+  , nPhaseIndex NPost    < nPhaseIndex NPayload
+  , nPhaseIndex NPayload < nPhaseIndex NQuit
+  ) = (True, True, True)
+nOrderingSoundArticle = Refl
