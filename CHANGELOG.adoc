@@ -12,12 +12,18 @@ The unit of release is the *action ref*: the tag or commit you pin determines bo
 
 toc::[]
 
-== v0.4.0 — 2026-09-30
+== v0.4.0 — 2026-10-04
 
 Closes issue #6 (community health, accessibility, self-diagnosis, published
 benchmarks). The first attempt at it (PR #20) was merged with four of eleven
 checks failing and left `main` unable to compile; this release replaces that
 work rather than building on it. See `KNOWN-DEFECTS.adoc`, D-010 and D-011.
+
+The release content landed in a commit dated 2026-09-30 but the tag was only
+pushed on 2026-10-04, so the `action.yml`-names-assets-that-do-not-exist
+window described under v0.3.0 stayed open for four days rather than minutes —
+a process failure, not a tree one: the release workflow's hash gate passed on
+first run when the tag went out.
 
 === Added
 
