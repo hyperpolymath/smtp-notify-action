@@ -136,10 +136,10 @@ pub fn writeSubjectValue(w: *std.Io.Writer, prefix_len: usize, subject: []const 
     }
 }
 
-/// Write a validated Content-Language value in canonical form: tags trimmed
-/// and joined with ", ". Validation (`contentLanguageOk`) accepts optional
-/// spaces around each tag; they are not worth carrying onto the wire.
-pub fn writeContentLanguage(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+/// Write a validated comma-separated value in canonical form: items trimmed
+/// and joined with ", ". Validation accepts optional spaces around each item;
+/// they are not worth carrying onto the wire.
+fn writeCommaSeparated(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
     var it = std.mem.splitScalar(u8, value, ',');
     var first = true;
     while (it.next()) |raw| {
@@ -147,6 +147,73 @@ pub fn writeContentLanguage(w: *std.Io.Writer, value: []const u8) std.Io.Writer.
         first = false;
         try w.writeAll(std.mem.trim(u8, raw, " "));
     }
+}
+
+/// Write a validated Content-Language value in canonical form.
+pub fn writeContentLanguage(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    return writeCommaSeparated(w, value);
+}
+
+/// Write a validated Newsgroups value in canonical form. Same shape as
+/// Content-Language because RFC 5536 §3.1.4 also makes Newsgroups a
+/// comma-separated list with optional spaces — the dot in a name separates
+/// hierarchy components, not entries.
+pub fn writeNewsgroups(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    return writeCommaSeparated(w, value);
+}
+
+/// Character set a newsgroup name component may use. Mirrors `isGroupChar` in
+/// spec/Nntp/Serialize.idr: RFC 5536 §3.1.4 restricts the field to 7-bit
+/// printable ASCII and forbids '*'; this client admits only the set the
+/// hierarchy actually uses (letters, digits, '+', '-', '_').
+fn isGroupChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or c == '+' or c == '-' or c == '_';
+}
+
+const group_component_max = 32;
+const group_name_max = 255;
+
+/// One dot-separated component: 1-32 characters, none of them a separator.
+fn groupComponentOk(s: []const u8) bool {
+    if (s.len < 1 or s.len > group_component_max) return false;
+    for (s) |c| if (!isGroupChar(c)) return false;
+    return true;
+}
+
+/// A newsgroup name: dot-separated well-formed components, so no leading,
+/// trailing or doubled '.' (each of which yields an empty component).
+fn groupNameShaped(s: []const u8) bool {
+    var it = std.mem.splitScalar(u8, s, '.');
+    while (it.next()) |comp| {
+        if (!groupComponentOk(comp)) return false;
+    }
+    return true;
+}
+
+/// RFC 5536 §3.1.4: `control` and `control.*` are reserved for control
+/// messages and MUST NOT be used for normal articles.
+fn groupReserved(s: []const u8) bool {
+    return std.mem.eql(u8, s, "control") or std.mem.startsWith(u8, s, "control.");
+}
+
+/// One newsgroup name as this client accepts it. Shape only — whether the
+/// group exists, or is carried by the server, is the server's answer, not
+/// this predicate's.
+pub fn newsgroupOk(s: []const u8) bool {
+    return groupNameShaped(s) and !groupReserved(s) and s.len <= group_name_max;
+}
+
+/// A Newsgroups value: comma-separated names, optional spaces around each,
+/// plus the header-injection conjunct. Mirrors `newsgroupsOk` in
+/// spec/Nntp/Serialize.idr, whose theorem `newsgroupsNoInjection` is stated
+/// over exactly this conjunction.
+pub fn newsgroupsOk(value: []const u8) bool {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |raw| {
+        if (!newsgroupOk(std.mem.trim(u8, raw, " "))) return false;
+    }
+    return headerValueOk(value);
 }
 
 const day_names = [7][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
@@ -278,6 +345,22 @@ test "Content-Language is written trimmed and ', '-joined" {
     var w: std.Io.Writer = .fixed(&buf);
     try writeContentLanguage(&w, " en ,cy ");
     try std.testing.expectEqualStrings("en, cy", w.buffer[0..w.end]);
+}
+
+test "Newsgroups verdicts agree with the spec's golden vectors" {
+    for (fsm.newsgroup_vectors) |v| {
+        std.testing.expectEqual(v.ok, newsgroupsOk(v.input)) catch |err| {
+            std.debug.print("newsgroup vector disagreed: \"{s}\" (spec says {s})\n", .{ v.input, if (v.ok) "ok" else "refused" });
+            return err;
+        };
+    }
+}
+
+test "Newsgroups is written trimmed and ', '-joined" {
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeNewsgroups(&w, " alt.test ,uk.rec.cycling ");
+    try std.testing.expectEqualStrings("alt.test, uk.rec.cycling", w.buffer[0..w.end]);
 }
 
 test "RFC 2047: every chunk boundary position round-trips" {

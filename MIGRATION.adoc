@@ -8,7 +8,10 @@ match `dawidd6/action-send-mail` exactly; fifteen are absent; and several shared
 names differ in default or in meaning. Read the drift section before switching a
 working workflow.
 
-NOTE: This guide describes *v0.4.0*. The `secure` input changed behaviour in
+NOTE: This guide describes *v0.5.0*. Two inputs here do not exist in
+`dawidd6/action-send-mail`: `protocol` (`smtp` or `nntp`, default `smtp`) and
+`newsgroups`. Both default to the SMTP behaviour this guide describes, so a
+migrated workflow is unaffected unless it sets them. The `secure` input changed behaviour in
 v0.2.0: v0.1.0 treated any unrecognised value as plaintext, v0.2.0 rejects it.
 v0.3.0 added the STARTTLS submission-port route described below; v0.4.0 adds
 `diagnose`, `content_language` and UTF-8 subjects. Pin `@v0.4.0` (by commit
@@ -212,7 +215,7 @@ failure is now legible, but it is still a failure.
 .After
 [source,yaml]
 ----
-- uses: hyperpolymath/smtp-notify-action@<v0.4.0 commit SHA> # v0.4.0
+- uses: hyperpolymath/smtp-notify-action@<v0.5.0 commit SHA> # v0.5.0
   with:
     server_address: smtp.example.org
     server_port: 465

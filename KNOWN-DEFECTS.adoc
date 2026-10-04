@@ -186,6 +186,37 @@ that does not exist until release — is why inputs now land in the release
 commit, never before it.
 |https://github.com/hyperpolymath/smtp-notify-action/issues/6[#6]
 
+|D-013
+|The NNTP client always authenticates: it drives `AUTHINFO USER`/`PASS`, and a
+server that permits anonymous posting cannot be used at all. The proven table
+has no anonymous shape, and adding one would mean a third table and a third set
+of proofs, so the limitation is stated instead of worked around by sending an
+empty credential pair — which would put a blank username on the wire and still
+fail.
+|Low
+|Open (deliberate)
+|Tracked in the issue tracker
+
+|D-014
+|`diagnose` is not implemented for NNTP. With `protocol: nntp` it fails the
+step and points at `handshake_only`, rather than running an SMTP-shaped probe
+with news words in it. The stage vocabulary (DNS, TCP, TLS, EHLO, AUTH, MSG)
+would have to be restated for a protocol whose capability exchange is
+`CAPABILITIES` and whose payload step is an article.
+|Low
+|Open (deliberate)
+|Tracked in the issue tracker
+
+|D-015
+|No NNTP session has ever been run against a real news server. The session
+dialogue, `NNTPS`, the `STARTTLS` upgrade and `AUTHINFO` are covered by
+scripted unit tests and by a local fixture sink (`scripts/nntp-sink.py`) in CI.
+Unlike the SMTP path, there is no live canary: the `tls-handshake` job speaks
+SMTP to Gmail. The first live post should be treated as the experiment it is.
+|Medium
+|Open
+|Tracked in the issue tracker
+
 |D-012
 |Non-ASCII in a `from` display name is sent as raw 8-bit bytes in the header
 rather than RFC 2047 encoded. Most receivers cope (SMTPUTF8 era), but it is
@@ -214,8 +245,20 @@ verification is always on and no input can turn it off.
 The action advertises a machine-checked specification, so the boundary of that
 claim belongs in the defect register rather than only in the README.
 
-* *Universally quantified*: dot-stuffing (`stuffSafe` in `spec/src/Serialize.idr`)
-  — a theorem over all inputs.
+* *Universally quantified*: dot-stuffing (`stuffSafe` in `spec/Smtp/Serialize.idr`)
+  — a theorem over all inputs. One theorem for both protocols: RFC 3977 §3.1.1
+  inherits the same rule from RFC 5321, and the NNTP driver calls the same
+  `message.writeStuffedLine`.
+* *Proved over the concrete tables, NNTP*: the same shape of properties in
+  `spec/Nntp/StateMachine.idr` — deterministic coverage, termination, ordering,
+  no repeats, and that the upgrade is on the walked path — over two tables (6
+  rows implicit, 8 rows with STARTTLS). The message grammar
+  (`Nntp.Serialize.newsgroupsNoInjection`) is the NNTP counterpart of the
+  Content-Language theorem, stated over the same conjunction the Zig
+  `newsgroupsOk` implements.
+* *Not proved for NNTP*: the `AUTHINFO` challenge exchange. As with `AUTH LOGIN`
+  on the SMTP side, the 381 demand is consumed in Zig, off the table; the
+  terminal reply is still checked against the row's `281`.
 * *Proved over the concrete tables*: the protocol state machine's determinism,
   termination, ordering, and — since the STARTTLS table landed — that the
   upgrade rows are actually *reached from the start state*, which a per-row

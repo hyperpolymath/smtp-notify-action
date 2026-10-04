@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const smtp = @import("smtp.zig");
+const nntp = @import("nntp.zig");
 // Vendored std TLS client + certificate_request patch (ziglang/zig#19521);
 // see the provenance header in that file. Swap back to std.crypto.tls.Client
 // when upstream can answer a client-certificate request.
@@ -104,6 +105,55 @@ fn parseTransport(map: *const Env) Transport {
             "password on the wire in the clear.",
         .{v},
     );
+}
+
+/// Which protocol this run speaks.
+///
+/// Chosen by name, never inferred from which inputs happen to be set. A
+/// workflow that sets `newsgroups` by mistake while meaning to send mail
+/// should be told so, not quietly switched onto a different wire protocol —
+/// and vice versa.
+pub const Protocol = enum { smtp, nntp };
+
+/// Parse `SMTP_PROTOCOL`, fail-closed. Unset or empty means SMTP, which is
+/// what every existing workflow means.
+fn parseProtocol(map: *const Env) Protocol {
+    const v = env(map, "SMTP_PROTOCOL") orelse return .smtp;
+    if (v.len == 0) return .smtp;
+    if (std.ascii.eqlIgnoreCase(v, "smtp")) return .smtp;
+    if (std.ascii.eqlIgnoreCase(v, "nntp")) return .nntp;
+    fatal("SMTP_PROTOCOL is \"{s}\", which is neither \"smtp\" nor \"nntp\"", .{v});
+}
+
+/// The port a transport implies when the workflow did not name one.
+///
+/// These are the registered defaults, not guesses: 465/587/25 for SMTP
+/// (RFC 8314 §3.3 and the submission port) and 563/119 for NNTP
+/// (RFC 3977 §4, RFC 4642 §3). Naming one explicitly always wins.
+fn defaultPort(protocol: Protocol, transport: Transport) u16 {
+    return switch (protocol) {
+        .smtp => switch (transport) {
+            .implicit_tls => 465,
+            .starttls => 587,
+            .plaintext => 25,
+        },
+        .nntp => switch (transport) {
+            .implicit_tls => 563,
+            .starttls, .plaintext => 119,
+        },
+    };
+}
+
+/// `SMTP_PORT` when the workflow set one, otherwise the transport's default.
+///
+/// The action's own `server_port` input defaults to empty now, precisely so
+/// this choice can be made by protocol: a fixed 465 in action.yml would send
+/// an NNTP run to the SMTP port unless the user knew to override it.
+fn resolvePort(map: *const Env, protocol: Protocol, transport: Transport) u16 {
+    const v = env(map, "SMTP_PORT") orelse return defaultPort(protocol, transport);
+    if (v.len == 0) return defaultPort(protocol, transport);
+    return std.fmt.parseInt(u16, v, 10) catch
+        fatal("SMTP_PORT is not a port number: {s}", .{v});
 }
 
 const default_timeout_seconds: u32 = 60;
@@ -213,10 +263,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const envs = &env_map;
 
     const addr = envRequired(envs, "SMTP_ADDR");
-    const port_str = envRequired(envs, "SMTP_PORT");
-    const port = std.fmt.parseInt(u16, port_str, 10) catch
-        fatal("SMTP_PORT is not a port number: {s}", .{port_str});
     const transport = parseTransport(envs);
+    const protocol = parseProtocol(envs);
+    const port = resolvePort(envs, protocol, transport);
     const diagnose = envFlag(envs, "SMTP_DIAGNOSE", false);
     // Both flags are parsed before either is used, so a malformed value is
     // rejected even when the other one would have decided the run.
@@ -225,6 +274,33 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // handshake-only session, and reports each stage as it is reached.
     const handshake_only = diagnose or handshake_flag;
     const timeout_seconds = envSeconds(envs, "SMTP_TIMEOUT_SECONDS", default_timeout_seconds);
+
+    // Each protocol's inputs are checked against the protocol, not against
+    // the other one's, so a workflow that mixes them is told which mistake it
+    // made. Both checks happen before the watchdog starts: a configuration
+    // error is not a timeout.
+    const newsgroups = env(envs, "MAIL_NEWSGROUPS");
+    switch (protocol) {
+        .smtp => if (newsgroups != null and newsgroups.?.len != 0) fatal(
+            "MAIL_NEWSGROUPS is set but SMTP_PROTOCOL is smtp (the default). " ++
+                "Refusing to guess whether you meant mail or news; set SMTP_PROTOCOL: nntp, " ++
+                "or use MAIL_TO for mail.",
+            .{},
+        ),
+        .nntp => {
+            if (newsgroups == null or newsgroups.?.len == 0) fatal(
+                "SMTP_PROTOCOL is nntp but MAIL_NEWSGROUPS is empty. " ++
+                    "One or more newsgroup names are required, e.g. \"alt.test\".",
+                .{},
+            );
+            if (diagnose) fatal(
+                "SMTP_DIAGNOSE is an SMTP probe and is not implemented for NNTP. " ++
+                    "For a news-server reachability probe use SMTP_HANDSHAKE_ONLY: true, " ++
+                    "which performs the TLS handshake, CAPABILITIES, and QUIT.",
+                .{},
+            );
+        },
+    }
 
     // Detached: it either fires and exits the process, or the process exits
     // first and takes it with it.
@@ -235,6 +311,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const now: std.Io.Timestamp = .now(io, .real);
+
+    if (protocol == .nntp) {
+        return runNews(gpa, io, envs, addr, port, transport, handshake_only, now);
+    }
 
     var cfg: smtp.Config = if (handshake_only) .{
         .ehlo_domain = "github-actions",
@@ -787,6 +867,280 @@ const TlsUpgrade = struct {
 
 /// Report a failed session — the server's own words where it gave any, the
 /// AUTH mechanisms on offer where AUTH failed — and exit 1.
+/// A Message-ID for the one article this run posts: `<epoch.nonce@host>`.
+///
+/// RFC 5536 §3.1.2 requires a posted article to carry one, and requires it to
+/// be unique worldwide — a server that has seen the identifier before may
+/// silently drop the second article as a duplicate. The epoch part orders
+/// posts; the nonce is what makes two runs in the same second distinct, which
+/// matters because concurrent workflow runs are ordinary. Without the nonce a
+/// retry or a second job in the same second could be discarded by the server
+/// while this step reported success.
+fn newsMessageId(gpa: std.mem.Allocator, io: std.Io, now: i64) []const u8 {
+    var nonce: [8]u8 = undefined;
+    io.random(&nonce);
+
+    // The right-hand side is by convention a domain the poster can be reached
+    // at; for a runner, that is its own host name. If it cannot be read, or
+    // contains nothing usable, say so in the identifier rather than inventing
+    // a domain that belongs to someone else — `.invalid` is reserved for
+    // exactly this (RFC 2606 §2).
+    var host_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    var host: []const u8 = "unknown.invalid";
+    if (std.posix.gethostname(&host_buf)) |name| {
+        var kept: usize = 0;
+        for (name) |c| {
+            if (std.ascii.isAlphanumeric(c) or c == '-' or c == '.') {
+                host_buf[kept] = c;
+                kept += 1;
+            }
+        }
+        if (kept > 0) host = host_buf[0..kept];
+    } else |_| {}
+
+    return std.fmt.allocPrint(gpa, "<{d}.{x}@{s}>", .{ now, nonce, host }) catch |err|
+        fatal("cannot build a Message-ID: {t}", .{err});
+}
+
+/// Run an NNTP posting session over the transport `SMTP_SECURE` selected.
+///
+/// Mirrors the SMTP path deliberately: the same connection, the same TLS
+/// verification, the same watchdog, the same fail-closed rule that a server
+/// which will not encrypt is an error rather than a downgrade. What differs
+/// is only the dialogue, which lives in src/nntp.zig and is driven by the
+/// proven tables in spec/Nntp/.
+fn runNews(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    envs: *const Env,
+    addr: []const u8,
+    port: u16,
+    transport: Transport,
+    handshake_only: bool,
+    now: std.Io.Timestamp,
+) void {
+    // NNTP always authenticates here. A server that permits anonymous posting
+    // is a server this client cannot drive — stated in README and
+    // KNOWN-DEFECTS rather than papered over with an empty AUTHINFO pair,
+    // which would put a blank username on the wire and still fail.
+    const user = env(envs, "SMTP_USER") orelse "";
+    const pass = env(envs, "SMTP_PASS") orelse "";
+    if (!handshake_only and (user.len == 0 or pass.len == 0)) fatal(
+        "posting to a newsgroup authenticates (AUTHINFO USER/PASS), and " ++
+            "SMTP_USER or SMTP_PASS is empty. Anonymous posting is not implemented.",
+        .{},
+    );
+
+    var cfg: nntp.Config = if (handshake_only) .{
+        .username = "",
+        .password = "",
+        .from = "",
+        .newsgroups = envRequired(envs, "MAIL_NEWSGROUPS"),
+        .subject = "",
+        .body = "",
+        .date_epoch_seconds = 0,
+        .message_id = "<handshake-only@invalid>",
+        .handshake_only = true,
+    } else .{
+        .username = user,
+        .password = pass,
+        .from = envRequired(envs, "MAIL_FROM"),
+        .newsgroups = envRequired(envs, "MAIL_NEWSGROUPS"),
+        .subject = envRequired(envs, "MAIL_SUBJECT"),
+        .content_language = env(envs, "MAIL_CONTENT_LANGUAGE") orelse "",
+        .body = envRequired(envs, "MAIL_BODY"),
+        .date_epoch_seconds = now.toSeconds(),
+        .message_id = newsMessageId(gpa, io, now.toSeconds()),
+        .handshake_only = false,
+    };
+    cfg.use_starttls = transport == .starttls;
+
+    // Everything checkable without a server is checked BEFORE the socket is
+    // opened. The driver checks again (it is the last line of defence against
+    // a caller that skipped this), but doing it here means a typo in a
+    // newsgroup name is reported as a typo rather than as a connection
+    // failure to a server that is merely unreachable, and an injecting input
+    // never causes a TCP connection to a news server at all.
+    nntp.validateArticle(cfg) catch |err| fatalNewsSession(err, addr, port, null);
+
+    const host = std.Io.net.HostName.init(addr) catch
+        fatal("invalid host name: {s}", .{addr});
+
+    var stream = connectNoTimeout(host, io, port, .{ .mode = .stream }) catch |err|
+        fatal("cannot connect to {s}:{d}: {t}", .{ addr, port, err });
+    defer stream.close(io);
+
+    const socket_read_buf = gpa.alloc(u8, tls_buf_len) catch |err| fatal("{t}", .{err});
+    const stream_write_buf = gpa.alloc(u8, tls_buf_len) catch |err| fatal("{t}", .{err});
+    var stream_reader = stream.reader(io, socket_read_buf);
+    var stream_writer = stream.writer(io, stream_write_buf);
+
+    var diag: nntp.Diagnostic = .{};
+
+    if (transport == .plaintext) {
+        nntp.runSessionDiag(cfg, .{
+            .r = &stream_reader.interface,
+            .w = &stream_writer.interface,
+        }, &diag) catch |err| fatalNewsSession(err, addr, port, &diag);
+        if (handshake_only) {
+            std.debug.print("smtp-notify: NNTP handshake + CAPABILITIES ok via {s}:{d} (plaintext)\n", .{ addr, port });
+        } else {
+            std.debug.print("smtp-notify: posted to {s} via {s}:{d} (plaintext)\n", .{ cfg.newsgroups, addr, port });
+        }
+        return;
+    }
+
+    var tls_env: TlsEnv = undefined;
+    tls_env.init(gpa, io, now);
+    const tls_options = tls_env.options(gpa, io, addr, now);
+
+    var tls_client: TlsClient = undefined;
+
+    if (transport == .starttls) {
+        var upgrade: TlsUpgrade = .{
+            .client = &tls_client,
+            .options = tls_options,
+            .input = &stream_reader.interface,
+            .output = &stream_writer.interface,
+            .addr = addr,
+            .port = port,
+        };
+        cfg.upgrader = .{ .ctx = &upgrade, .upgradeFn = TlsUpgrade.run };
+
+        nntp.runSessionDiag(cfg, .{
+            .r = &stream_reader.interface,
+            .w = &stream_writer.interface,
+        }, &diag) catch |err| fatalNewsSession(err, addr, port, &diag);
+
+        if (upgrade.handshook) tls_client.end() catch {};
+        stream_writer.interface.flush() catch {};
+
+        if (handshake_only) {
+            std.debug.print("smtp-notify: NNTP STARTTLS handshake + CAPABILITIES ok via {s}:{d}\n", .{ addr, port });
+        } else {
+            std.debug.print("smtp-notify: posted to {s} via {s}:{d} (STARTTLS)\n", .{ cfg.newsgroups, addr, port });
+        }
+        return;
+    }
+
+    tls_client = TlsClient.init(
+        &stream_reader.interface,
+        &stream_writer.interface,
+        tls_options,
+    ) catch |err| fatal("TLS handshake with {s}:{d} failed: {t}", .{ addr, port, err });
+
+    nntp.runSessionDiag(cfg, .{
+        .r = &tls_client.reader,
+        .w = &tls_client.writer,
+        .below = &stream_writer.interface,
+    }, &diag) catch |err| fatalNewsSession(err, addr, port, &diag);
+
+    tls_client.end() catch {}; // close_notify, best effort — QUIT already got 205
+    stream_writer.interface.flush() catch {};
+
+    if (handshake_only) {
+        std.debug.print("smtp-notify: NNTP TLS handshake + CAPABILITIES ok via {s}:{d}\n", .{ addr, port });
+    } else {
+        std.debug.print("smtp-notify: posted to {s} via {s}:{d} (TLS)\n", .{ cfg.newsgroups, addr, port });
+    }
+}
+
+/// Report an NNTP session failure the way `fatalSession` reports an SMTP one:
+/// the server's own words when it said any, what it advertised when the
+/// failure was at authentication, then the one line that names the fix.
+fn fatalNewsSession(err: nntp.Error, addr: []const u8, port: u16, maybe_diag: ?*const nntp.Diagnostic) noreturn {
+    // Null is the pre-connect case: nothing has been said to or heard from a
+    // server, so there is no reply and no capability list to report.
+    var empty: nntp.Diagnostic = .{};
+    const diag = maybe_diag orelse &empty;
+    if (diag.code != 0) {
+        var clean: [nntp.reply_text_max * 3]u8 = undefined;
+        std.debug.print(
+            "smtp-notify: {s}:{d} replied {d} at the {t} step: {s}{s}\n",
+            .{ addr, port, diag.code, diag.phase, smtp.sanitizeServerText(&clean, diag.text()), if (diag.truncated) " […]" else "" },
+        );
+    }
+    // The agent/user distinction is the one an operator cannot recover from
+    // the exit code alone: 481 wants a different password, "no mechanism we
+    // speak" wants a different server or an implementation.
+    if (diag.phase == .auth and diag.code != 0) {
+        if (diag.caps.authInfoRaw().len > 0) {
+            std.debug.print(
+                "smtp-notify: this client used AUTHINFO {s}; {s}:{d} advertised: {s}\n",
+                .{
+                    if (diag.mechanism) |m| @tagName(m) else "(none chosen)",
+                    addr,
+                    port,
+                    diag.caps.authInfoRaw(),
+                },
+            );
+            if (diag.mechanism == null) std.debug.print(
+                "smtp-notify: none of those can be driven by this client (USER/PASS only).\n" ++
+                    "  SASL needs the 383 continuation exchange, which is not implemented.\n",
+                .{},
+            );
+        } else {
+            std.debug.print(
+                "smtp-notify: {s}:{d} advertised no AUTHINFO line at all — it may require the\n" ++
+                    "  credentials to be sent after STARTTLS. Set SMTP_SECURE: starttls (port 119).\n",
+                .{ addr, port },
+            );
+        }
+    }
+    switch (err) {
+        error.PostingNotPermitted => fatal(
+            "{s}:{d} will not accept posts from this session (201 greeting or 440 reply) — " ++
+                "posting prohibited for this account or server",
+            .{ addr, port },
+        ),
+        error.ArticleRejected => fatal(
+            "{s}:{d} refused the article itself (441) — see its words above; too many groups, " ++
+                "a moderated group, or a policy rejection are the usual causes",
+            .{ addr, port },
+        ),
+        error.TransientFailure => fatal("{s}:{d} replied 4xx (transient failure) — retry later", .{ addr, port }),
+        error.PermanentFailure => fatal("{s}:{d} replied 5xx (permanent failure) — check credentials/newsgroup", .{ addr, port }),
+        error.ProtocolError => fatal("{s}:{d} sent a reply outside the proven protocol table", .{ addr, port }),
+        error.HeaderInjection => fatal(
+            "CR/LF in a header-bound input (from/newsgroups/subject/content_language/message-id) — refusing to post",
+            .{},
+        ),
+        error.NewsgroupsInvalid => fatal(
+            "MAIL_NEWSGROUPS is not a comma-separated list of well-formed newsgroup names " ++
+                "(RFC 5536 §3.1.4; `control` and `control.*` are reserved) — refusing to post rather than repair it",
+            .{},
+        ),
+        error.ContentLanguageInvalid => fatal(
+            "MAIL_CONTENT_LANGUAGE is not a comma-separated list of RFC 5646 language tags " ++
+                "(e.g. \"en-GB\" or \"en, cy\") — refusing to post rather than repair it",
+            .{},
+        ),
+        error.SubjectNotUtf8 => fatal("MAIL_SUBJECT contains non-ASCII bytes that are not valid UTF-8 — refusing to mislabel it", .{}),
+        error.MessageIdInvalid => fatal("internal: the generated Message-ID is not a well-formed identifier", .{}),
+        error.ReplyMalformed => fatal("{s}:{d} sent something that is not an NNTP reply line", .{ addr, port }),
+        error.AuthTooLong => fatal("SMTP_USER plus SMTP_PASS exceeds the 512-byte AUTHINFO limit", .{}),
+        // The three STARTTLS outcomes need three different fixes, so they do
+        // not collapse into one message.
+        error.StartTlsNotOffered => fatal(
+            "{s}:{d} does not advertise STARTTLS, and SMTP_SECURE selects it. " ++
+                "Refusing to continue unencrypted. Check the port (119 for a cleartext news port, " ++
+                "563 for implicit TLS with SMTP_SECURE: true).",
+            .{ addr, port },
+        ),
+        error.StartTlsUpgradeFailed => fatal(
+            "the TLS handshake with {s}:{d} failed after it accepted STARTTLS (reason above)",
+            .{ addr, port },
+        ),
+        error.StartTlsUnconfigured => fatal("internal: STARTTLS selected with no upgrader wired", .{}),
+        error.AuthMechanismUnsupported => fatal(
+            "{s}:{d} offers no AUTHINFO mechanism this client can drive (see the advertised list above). " ++
+                "No credential was sent. AUTHINFO USER/PASS is supported; AUTHINFO SASL is not.",
+            .{ addr, port },
+        ),
+        else => fatal("news session with {s}:{d} failed: {t}", .{ addr, port, err }),
+    }
+}
+
 fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.Diagnostic) noreturn {
     // The server's own words, when it got as far as saying any. Without this a
     // 535, a 550 and a 554 are one indistinguishable failure in the log
@@ -862,4 +1216,141 @@ fn fatalSession(err: smtp.Error, addr: []const u8, port: u16, diag: *const smtp.
         ),
         else => fatal("session with {s}:{d} failed: {t}", .{ addr, port, err }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: the environment-to-policy layer.
+//
+// These live here rather than in src/smtp.zig because they are about the
+// action's *policy* decisions — which transport, which protocol, which port —
+// and the fail-closed rule for each. The protocol dialogues are tested in
+// src/smtp.zig and src/nntp.zig.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// A `Map` built from literal pairs, so a test can describe an environment
+/// without touching the process's own.
+fn testEnv(pairs: []const [2][]const u8) std.process.Environ.Map {
+    var map = std.process.Environ.Map.init(testing.allocator);
+    for (pairs) |kv| map.put(kv[0], kv[1]) catch @panic("OOM in test");
+    return map;
+}
+
+test "SMTP_SECURE: the fail-closed spellings, and nothing else" {
+    {
+        var e = testEnv(&.{});
+        defer e.deinit();
+        try testing.expectEqual(Transport.implicit_tls, parseTransport(&e));
+    }
+    {
+        // The dawidd6 spelling, read the way dawidd6 means it.
+        var e = testEnv(&.{.{ "SMTP_SECURE", "false" }});
+        defer e.deinit();
+        try testing.expectEqual(Transport.starttls, parseTransport(&e));
+    }
+    {
+        // Case and the explicit names, which are the documented additions.
+        var e = testEnv(&.{.{ "SMTP_SECURE", "StArTtLs" }});
+        defer e.deinit();
+        try testing.expectEqual(Transport.starttls, parseTransport(&e));
+    }
+    {
+        var e = testEnv(&.{.{ "SMTP_SECURE", "implicit" }});
+        defer e.deinit();
+        try testing.expectEqual(Transport.implicit_tls, parseTransport(&e));
+    }
+    {
+        // Cleartext has to be named. `1`, `yes`, `on` and `TRUE` are NOT
+        // spellings of "true" here: that conflation is exactly issue #1, where
+        // anything but the exact string "true" meant plaintext.
+        var e = testEnv(&.{.{ "SMTP_SECURE", "plaintext" }});
+        defer e.deinit();
+        try testing.expectEqual(Transport.plaintext, parseTransport(&e));
+    }
+    // An empty value is the default, not an error: `${{ inputs.secure }}`
+        // with the default applied yields "true", but a caller passing an empty
+    // string means "unset" and gets the safe default.
+    {
+        var e = testEnv(&.{.{ "SMTP_SECURE", "" }});
+        defer e.deinit();
+        try testing.expectEqual(Transport.implicit_tls, parseTransport(&e));
+    }
+}
+
+test "SMTP_PROTOCOL: unset or empty means SMTP; the two names are recognised" {
+    {
+        var e = testEnv(&.{});
+        defer e.deinit();
+        try testing.expectEqual(Protocol.smtp, parseProtocol(&e));
+    }
+    {
+        var e = testEnv(&.{.{ "SMTP_PROTOCOL", "" }});
+        defer e.deinit();
+        try testing.expectEqual(Protocol.smtp, parseProtocol(&e));
+    }
+    {
+        var e = testEnv(&.{.{ "SMTP_PROTOCOL", "smtp" }});
+        defer e.deinit();
+        try testing.expectEqual(Protocol.smtp, parseProtocol(&e));
+    }
+    {
+        var e = testEnv(&.{.{ "SMTP_PROTOCOL", "NNTP" }});
+        defer e.deinit();
+        try testing.expectEqual(Protocol.nntp, parseProtocol(&e));
+    }
+}
+
+test "default ports: what each protocol and transport means when none is named" {
+    // The registered defaults, so a workflow of just `server_address` +
+    // `secure` reaches the right port in both protocols.
+    try testing.expectEqual(@as(u16, 465), defaultPort(.smtp, .implicit_tls));
+    try testing.expectEqual(@as(u16, 587), defaultPort(.smtp, .starttls));
+    try testing.expectEqual(@as(u16, 25), defaultPort(.smtp, .plaintext));
+    try testing.expectEqual(@as(u16, 563), defaultPort(.nntp, .implicit_tls));
+    try testing.expectEqual(@as(u16, 119), defaultPort(.nntp, .starttls));
+    try testing.expectEqual(@as(u16, 119), defaultPort(.nntp, .plaintext));
+}
+
+test "SMTP_PORT: an explicit port always wins, empty and unset fall through" {
+    {
+        var e = testEnv(&.{.{ "SMTP_PORT", "1025" }});
+        defer e.deinit();
+        try testing.expectEqual(@as(u16, 1025), resolvePort(&e, .smtp, .plaintext));
+    }
+    {
+        var e = testEnv(&.{.{ "SMTP_PORT", "563" }});
+        defer e.deinit();
+        try testing.expectEqual(@as(u16, 563), resolvePort(&e, .nntp, .implicit_tls));
+    }
+    {
+        var e = testEnv(&.{.{ "SMTP_PORT", "" }});
+        defer e.deinit();
+        try testing.expectEqual(@as(u16, 119), resolvePort(&e, .nntp, .starttls));
+    }
+    {
+        var e = testEnv(&.{});
+        defer e.deinit();
+        try testing.expectEqual(@as(u16, 465), resolvePort(&e, .smtp, .implicit_tls));
+    }
+}
+
+test "the generated Message-ID is well-formed, and two runs never collide" {
+    const io = testing.io;
+    const a = newsMessageId(testing.allocator, io, 1_000_000_000);
+    defer testing.allocator.free(a);
+    const b = newsMessageId(testing.allocator, io, 1_000_000_000);
+    defer testing.allocator.free(b);
+
+    // Shaped the way the driver will accept it.
+    try testing.expect(nntp.messageIdOk(a));
+    try testing.expect(nntp.messageIdOk(b));
+    // Same second, different identifier — the nonce is the whole point: two
+    // concurrent runs must not produce the same id, or the server may discard
+    // the second article while this step reports success.
+    try testing.expect(!std.mem.eql(u8, a, b));
+    // The epoch part is this run's clock, not a constant.
+    try testing.expect(std.mem.startsWith(u8, a, "<1000000000."));
+    // No stray bytes from the host name, whatever the runner is called.
+    for (a) |c| try testing.expect(c != ' ' and c > 0x20);
 }

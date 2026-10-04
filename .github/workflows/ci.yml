@@ -50,6 +50,20 @@ jobs:
       - name: Regenerate from the proven spec and diff (with selftest)
         run: bash scripts/check-fsm-drift.sh --selftest
 
+  action-metadata:
+    name: action.yml metadata gate (Marketplace)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # The Marketplace refuses a description of 125 characters or more, and
+      # it reads action.yml from the release tag — so the cheapest place to
+      # catch it is here, on the pull request, rather than in the publish form
+      # after the tag exists. See scripts/check-action.sh for the two
+      # measurement traps it closes.
+      - name: Description is publishable (with selftest)
+        run: bash scripts/check-action.sh --selftest
+
   e2e-mailpit:
     name: E2E delivery vs containerized sink
     runs-on: ubuntu-latest
@@ -177,6 +191,35 @@ jobs:
           # RFC 2047 §2: a line carrying an encoded-word is at most 76 chars.
           echo "$raw" | awk '/=\?UTF-8\?B\?/ && length($0) > 76 { bad = 1; print "over 76: " $0 } END { exit bad }' >&2
           echo "e2e ok: delivered, dot-stuffing round-tripped, subject and language intact"
+
+  e2e-nntp:
+    name: E2E news post vs fixture sink
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install Zig 0.16.0 (sha256-pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zig.tar.xz "$ZIG_TARBALL"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$HOME/zig-toolchain"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig-toolchain" --strip-components=1
+          echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+      # scripts/nntp-sink.py is a test fixture: a one-shot NNTP server that
+      # answers the dialogue and records what the binary actually sent. It is
+      # the news counterpart of the Mailpit container above, because no NNTP
+      # server is available as a sha256-pinned container.
+      - name: Post an article and assert what went on the wire
+        run: bash scripts/ci-nntp-post.sh
+      - name: Refusals name their own reason
+        run: bash scripts/ci-nntp-refusals.sh
+      - name: Inputs that cannot be right are refused before any connection
+        run: bash scripts/ci-nntp-inputs.sh
+      - name: Handshake-only posts nothing
+        run: bash scripts/ci-nntp-handshake.sh
 
   tls-handshake:
     # Live canary for the vendored TLS client (certificate_request patch,

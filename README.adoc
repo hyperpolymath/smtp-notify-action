@@ -11,11 +11,17 @@ only one Microsoft 365 offers at all. **Node-free**: the action is a composite
 step that runs one static binary — no `node_modules`, no container, no runtime
 dependency graph.
 
-The SMTP client session is **formally specified in Idris2** (state machine,
-reply-code classes, dot-stuffing, header-injection rejection — with
-machine-checked proofs) and **built in Zig** (0.16.0, static musl,
-byte-reproducible). The generated state table in the binary is diffed against
-the proven specification by CI on every push.
+The same binary posts an article to a newsgroup over NNTP — implicit TLS
+(NNTPS, port 563) or STARTTLS on the cleartext news port (RFC 4642, port 119) —
+when the workflow sets `protocol: nntp`. Same fail-closed transport rules, same
+dot-stuffing, one article per session; see <<news>>, including what it does
+*not* do.
+
+The SMTP and NNTP client sessions are **formally specified in Idris2** (state
+machines, reply-code classes, ordering, dot-stuffing, header-injection
+rejection — with machine-checked proofs) and **built in Zig** (0.16.0, static
+musl, byte-reproducible). The generated state tables in the binary are diffed
+against the proven specifications by CI on every push.
 
 Coming from `dawidd6/action-send-mail`? Read
 link:MIGRATION.adoc[`MIGRATION.adoc`] first: nine input names match exactly,
@@ -28,7 +34,7 @@ toc::[]
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.4.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.0
   with:
     server_address: ${{ secrets.SMTP_HOST }}
     server_port: 465
@@ -46,7 +52,7 @@ On the submission port, set `secure` to `starttls` and the port to 587:
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.4.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.0
   with:
     server_address: smtp.office365.com   # or smtp.gmail.com
     server_port: 587
@@ -64,6 +70,32 @@ smtp.gmail.com:587 and smtp.office365.com:587 both complete the STARTTLS
 handshake and the mandatory second EHLO. Authentication on that route is covered
 by tests rather than by a live send; see
 link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] D-005 to D-007.
+
+To post to a newsgroup instead, set `protocol: nntp` and name the groups with
+`newsgroups`. There is no `to`, because a news article has no envelope:
+
+[source,yaml]
+----
+- name: Post to a newsgroup
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.0
+  with:
+    protocol: nntp
+    server_address: news.example.org
+    secure: true                      # implicit TLS (NNTPS), port 563
+    username: ${{ secrets.NNTP_USERNAME }}
+    password: ${{ secrets.NNTP_PASSWORD }}
+    from: 'GitHub Push <bot@example.org>'
+    newsgroups: 'alt.test, uk.rec.cycling'
+    subject: 'Push to ${{ github.repository }}'
+    body: '${{ github.actor }} pushed ${{ github.sha }}'
+----
+
+`secure: starttls` on the news port (119) is the encrypted-upgrade route: the
+session starts cleartext, `STARTTLS` is issued only if the server advertised it
+in `CAPABILITIES`, and the capability list is re-read afterwards because a
+server may advertise differently once encrypted (RFC 4642 §2.2). A server that
+does not offer the upgrade fails the step rather than being posted to in the
+clear.
 
 These nine input names match `dawidd6/action-send-mail` exactly:
 `server_address`, `server_port`, `secure`, `username`, `password`, `from`,
@@ -86,8 +118,14 @@ on and cannot be turned off by any input.
 |===
 |Input |Default |Meaning
 
-|`server_address` |_required_ |SMTP server host name.
-|`server_port` |`465` |SMTP server port.
+|`server_address` |_required_ |Server host name (SMTP or NNTP).
+|`protocol` |`smtp` |`smtp` sends mail; `nntp` posts one article to the
+newsgroups named by `newsgroups`. Explicit, never inferred from which other
+inputs are set: `newsgroups` with `protocol: smtp` fails the step telling you
+which mistake it is, rather than guessing. See <<news>>.
+|`server_port` |_protocol default_ |Server port. Empty means the port the
+protocol and transport imply — SMTP: 465 implicit TLS, 587 STARTTLS, 25
+plaintext; NNTP: 563 implicit TLS, 119 STARTTLS and plaintext.
 |`secure` |`true` |Fail-closed transport selection, five accepted values.
 `true` or `implicit` = implicit TLS from the first byte (SMTPS).
 `false` or `starttls` = start in the clear and upgrade with STARTTLS
@@ -96,12 +134,20 @@ not advertise `STARTTLS` fails the step, because the alternative to upgrading
 is to stop, not to carry on in the clear.
 `plaintext` = no TLS, intended only for containerized test sinks. Any other
 value is rejected outright.
-|`username` |— |SMTP username. The mechanism (`PLAIN` or `LOGIN`) is chosen
-from what the server advertises.
-|`password` |— |SMTP password. Passed to the binary via the environment,
+|`username` |— |Username. SMTP: the mechanism (`PLAIN` or `LOGIN`) is
+chosen from what the server advertises. NNTP: `AUTHINFO USER`, always sent —
+see <<news>> for why anonymous posting is not offered.
+|`password` |— |Password. Passed to the binary via the environment,
 never argv, so it cannot leak into process listings.
 |`from` |— |`From:` header value.
-|`to` |— |Recipients, separated by commas and/or whitespace.
+|`to` |— |Recipients, separated by commas and/or whitespace. SMTP only:
+a news article is addressed by its `Newsgroups` header.
+|`newsgroups` |— |One or more newsgroup names, comma-separated, for
+`protocol: nntp` (`alt.test`, or `alt.test, uk.rec.cycling`). RFC 5536 §3.1.4
+well-formedness is enforced before the socket is opened: names are
+dot-separated components of 1–32 letters, digits, `+`, `-` or `_`, at most 255
+characters, `*` is refused, and so are the reserved `control` and `control.*`
+groups. Malformed input fails the step; nothing is repaired.
 |`subject` |— |`Subject:` header value. ASCII is sent unchanged; anything
 else goes out as RFC 2047 UTF-8 encoded-words, folded so no word exceeds 75
 characters. CR/LF, or non-ASCII that is not valid UTF-8, fails the step.
@@ -112,17 +158,93 @@ alphabetic) — looser than full RFC 5646 well-formedness, and not checked
 against the IANA registry. A value that fails fails the step rather than
 being repaired; one that passes is sent trimmed and `, `-joined.
 |`body` |— |Plain text only, by design: no HTML, no remote images, no
-tracking pixels. Dot-stuffed on the wire per RFC 5321 §4.5.2.
+tracking pixels. Dot-stuffed on the wire — RFC 5321 §4.5.2 for SMTP, RFC 3977
+§3.1.1 for NNTP.
 |`diagnose` |`false` |`true` = non-delivery probe reporting DNS, TCP, TLS,
-EHLO and AUTH as separate stages. Nothing is authenticated or sent. See
-<<diagnose>>.
-|`handshake_only` |`false` |`true` = connect, TLS handshake, `EHLO`, `QUIT` —
-no auth, nothing sent. For canary/CI verification against a real server.
+EHLO and AUTH as separate stages. Nothing is authenticated or sent. SMTP only:
+with `protocol: nntp` it fails the step and points at `handshake_only` rather
+than pretending. See <<diagnose>>.
+|`handshake_only` |`false` |`true` = connect, TLS handshake, `EHLO`
+(SMTP) or `CAPABILITIES` (NNTP), `QUIT` — no auth, nothing sent or posted. For
+canary/CI verification against a real server. On the NNTP STARTTLS path the
+upgrade and the second `CAPABILITIES` still happen, because a probe that
+skipped the upgrade would prove nothing about TLS.
 |`timeout_seconds` |`60` |Whole-run deadline. A watchdog bounds connection,
 handshake and every read and write, and fails the step with a diagnostic if it
 is exceeded. Deliberately whole-run rather than per-operation; see
 link:BUSTFILE.adoc[`BUSTFILE.adoc`].
 |===
+
+[[news]]
+== Posting to a newsgroup (NNTP)
+
+`protocol: nntp` posts **one** article per run to the newsgroups named in
+`newsgroups`. The dialogue (RFC 3977, plus RFC 4642 for the STARTTLS upgrade
+and RFC 4643 for `AUTHINFO`) is:
+
+[source]
+----
+connect      server greets with 200 (posting permitted)
+CAPABILITIES 101, dot-terminated list; must advertise POST
+AUTHINFO     USER then PASS, the 381 demand in between
+POST         340
+article      From, Newsgroups, Subject, Date, Message-ID, [Content-Language],
+             MIME-Version, Content-Type, Content-Transfer-Encoding, body
+QUIT         205
+----
+
+On the STARTTLS route the order is `CAPABILITIES` → `STARTTLS` (382) → TLS
+handshake → `CAPABILITIES` again, because RFC 4642 §2.2 requires the
+post-handshake list to replace the cleartext one. The proofs for both shapes
+live in `spec/Nntp/`, a separate module from the SMTP tables: NNTP is not
+SMTP with different verbs. Its greeting has two success codes of which only
+one permits posting (201 refuses it), and its intermediate replies (101, 340,
+382) are not one class — a merged table's proofs would say nothing about the
+session that actually runs.
+
+The `Message-ID` is generated per run as `<epoch.nonce@host>`, with the nonce
+drawn from the system entropy source. A posted article requires a unique one
+(RFC 5536 §3.1.2) and a server that has seen the identifier before may discard
+the article — silently, while this step reports success.
+
+=== What it does not do, stated up front
+
+* **It posts; it never reads news.** No `GROUP`, `ARTICLE`, `HDR` or `LIST`.
+* **One article per session.** No crosspost batching, no repeat loop.
+* **`AUTHINFO USER`/`PASS` only.** A server that advertises `AUTHINFO SASL`
+  alone is refused *before* a credential is written, the same way the SMTP
+  client refuses an XOAUTH2-only server; SASL needs the 383 continuation
+  exchange, which is not implemented.
+* **It always authenticates.** A server that permits anonymous posting cannot
+  be driven by this client, rather than being sent an empty credential pair
+  that would fail anyway. Recorded in link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`].
+* **`diagnose` is SMTP-only.** For a news-server probe use
+  `handshake_only: true`, which does the TLS handshake, `CAPABILITIES` and
+  `QUIT`.
+* **No news server has been contacted yet.** The NNTP session, including
+  `NNTPS` and the `STARTTLS` upgrade, is verified by scripted tests and by a
+  local fixture sink in CI — not against a live server. See
+  link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] D-015.
+
+=== Trying it without a news server
+
+`scripts/nntp-sink.py` is the fixture CI uses: a one-shot server that answers
+the dialogue above and records what the binary actually sent. Against a local
+build:
+
+[source,bash]
+----
+zig build
+python3 scripts/nntp-sink.py 1161 "200 sink ready" "240 Article received" &
+SMTP_ADDR=127.0.0.1 SMTP_PORT=1161 SMTP_SECURE=plaintext SMTP_PROTOCOL=nntp \
+SMTP_USER=ci SMTP_PASS=ci MAIL_FROM='CI <ci@example.test>' \
+MAIL_SUBJECT='hello' MAIL_NEWSGROUPS='alt.test' MAIL_BODY=$'one\n.two' \
+  ./zig-out/bin/smtp-notify
+cat 1161.transcript
+----
+
+`plaintext` exists for exactly this: a containerized or local sink. Any real
+server is reached over TLS, and a server that will not encrypt fails the run.
 
 == Security properties
 

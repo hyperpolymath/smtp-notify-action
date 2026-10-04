@@ -12,6 +12,97 @@ The unit of release is the *action ref*: the tag or commit you pin determines bo
 
 toc::[]
 
+== v0.5.0 — 2026-10-04
+
+Newsgroup posting, and the release that can finally be listed on the GitHub
+Marketplace. The two are one release because the description fix can only take
+effect from a tag — the Marketplace validates `action.yml` at the release's tag,
+not on `main` — and a tag is what this release is for.
+
+NOTE: The tag must be pushed immediately after this merge. Between the two, the
+tagged commit's `action.yml` names `v0.5.0` assets that do not exist yet, and
+`@main` inherits that window; the release workflow refuses to publish unless the
+asset URL equals the tag, so the window is a property of the release process
+rather than of this tree. If the tag lands on a later day, correct this heading
+with a follow-up commit, as was done for v0.4.0.
+
+=== Added
+
+* *`protocol` input (`smtp` | `nntp`, default `smtp`)*, chosen explicitly and
+  never inferred. `newsgroups` set while `protocol` is `smtp` fails the step
+  naming the mismatch, and `protocol: nntp` without `newsgroups` fails too,
+  rather than either combination being guessed at.
+* *NNTP posting — one article per run.* Implicit TLS (NNTPS, normally 563) or
+  `STARTTLS` on the cleartext news port (RFC 4642, normally 119), with
+  `AUTHINFO USER`/`PASS` (RFC 4643). The article carries `From`, `Newsgroups`,
+  `Subject` (RFC 2047 for non-ASCII), `Date`, a generated `Message-ID`,
+  optional `Content-Language`, `MIME-Version`, `Content-Type` and
+  `Content-Transfer-Encoding`; the body is dot-stuffed on the wire. The
+  STARTTLS path re-reads `CAPABILITIES` after the upgrade, as RFC 4642 §2.2
+  requires, and a server that does not advertise the upgrade is refused rather
+  than posted to in the clear.
+* *A second proven contract.* `spec/Nntp/StateMachine.idr` and
+  `spec/Nntp/Serialize.idr` hold the NNTP session tables (6 rows implicit, 8
+  with STARTTLS) and the Newsgroups grammar, with the same style of properties
+  as the SMTP spec: deterministic coverage, termination, ordering, and that the
+  upgrade is on the walked path — plus `newsgroupsNoInjection`, the analogue of
+  the Content-Language theorem. Both emit into the same
+  `src/generated/smtp_fsm.zig`, so the existing drift gate covers them; the
+  SMTP section of that file is unchanged.
+* *Failure attribution for the news session.* A 201 greeting and a 440 reply
+  are reported as "this server will not accept posts", 441 as the article
+  itself being refused (both at `POST` and after the article, where a class-only
+  rule would have advised a retry and duplicated the post), and a server
+  advertising `AUTHINFO SASL` alone is refused before a credential is written.
+  Malformed newsgroups, CR/LF in a header-bound input, an invalid
+  `Content-Language` and empty credentials are refused *before the socket is
+  opened*, so a typo does not read as a connection failure.
+* *`scripts/nntp-sink.py` and an `e2e-nntp` CI job.* A one-shot NNTP server
+  fixture, the news counterpart of the Mailpit container: the job posts an
+  article and asserts the dialogue order, the canonicalised newsgroup list, the
+  encoded-word subject, the generated `Message-ID` shape and the dot-stuffed
+  line on the wire — then asserts that each refusal names its own reason and
+  that no credential reaches a server that offered no mechanism it can drive.
+* *`scripts/check-action.sh` and an `action-metadata` CI job.* The Marketplace
+  description limit is 125 characters and is documented nowhere in the metadata
+  schema, so it is now a build-time gate with a `--selftest` that proves the
+  boundary: 125 is refused, 124 is accepted, and a folded (`>-`) description is
+  rejected outright because GitHub measures the parsed value.
+
+=== Changed
+
+* *The Marketplace description, from 430 characters to 110.* The publish form
+  rejects 125 or more with "Description must be less than 125 characters", and
+  it reads `action.yml` from the release tag — so v0.4.0's tag carries the long
+  form and could never have been published. The full text stays in this README,
+  which renders on the listing page and has no length limit. Publishing itself
+  remains a manual tick in the release UI (Developer Agreement and 2FA), and
+  the first listing can reuse this release.
+* *`server_port` defaults to empty.* Empty means the port the protocol and
+  transport imply: SMTP 465/587/25, NNTP 563/119. An explicit port still wins,
+  and `465` in a workflow keeps working unchanged.
+* *`diagnose` is SMTP-only.* With `protocol: nntp` it fails the step and points
+  at `handshake_only`, which performs the TLS handshake, `CAPABILITIES` and
+  `QUIT` for news as it does for mail.
+* *`build.zig`'s test step compiles three roots* (`src/smtp.zig`,
+  `src/nntp.zig`, `src/main.zig`) instead of one. Zig collects tests only from
+  the files a test root reaches, so `src/nntp.zig`'s sessions, and the
+  environment-to-policy layer in `src/main.zig` (transport parsing, protocol
+  selection, port defaults, `Message-ID` uniqueness) would otherwise not have
+  been run by `zig build test` at all. 214 tests now run; 132 did.
+* *`src/wire.zig`*: the `Wire` and `Upgrader` types moved out of `src/smtp.zig`
+  so both drivers ride the same streams and the same in-place upgrade callback.
+  `src/smtp.zig` re-exports them, and its behaviour is unchanged.
+* The asset URL now names `v0.5.0`, and `SECURITY.md`, `MIGRATION.adoc` and
+  this file move with it.
+
+=== Known limitations, recorded
+
+* D-013: NNTP always authenticates; anonymous posting is not offered.
+* D-014: `diagnose` is not implemented for NNTP.
+* D-015: no NNTP session has been run against a real news server; the
+  `tls-handshake` canary is SMTP-only.
+
 == v0.4.0 — 2026-10-04
 
 Closes issue #6 (community health, accessibility, self-diagnosis, published
