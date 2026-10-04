@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MPL-2.0
 name: 'SMTP Notify'
-description: >-
-  Send a plain-text notification email from a workflow over SMTPS (implicit
-  TLS, port 465) or STARTTLS on the submission port (587), which is what
-  Google Workspace expects and Microsoft 365 requires. Node-free: one static Zig
-  binary with zero dependencies, whose SMTP session is formally specified in
-  Idris2 and machine-checked. Implements nine dawidd6/action-send-mail input
-  names; it is a migration target, not a full replacement.
+# The GitHub Marketplace refuses to publish a description of 125 characters or
+# more, and it reads this file from the RELEASE TAG, not from main — so this
+# line has to be short before a tag is cut, not after the publish form says so.
+# It is measured on the PARSED value: a folded `>-` scalar is one long string
+# to GitHub, and a `grep '^description:'` reports the marker's length (2) and
+# false-passes. See scripts/check-action.sh, which counts it the same way and
+# fails the build if it grows again. The full description lives in README.adoc,
+# which has no length limit and renders on the listing page.
+description: 'Send notification email over SMTPS or STARTTLS, or post to a newsgroup over NNTPS. Static Zig binary, no Node.'
 author: 'hyperpolymath'
 branding:
   icon: 'mail'
@@ -17,17 +19,31 @@ inputs:
     description: 'SMTP server host name'
     required: true
   server_port:
-    description: 'SMTP server port'
+    description: >-
+      Server port. Empty = the port the protocol and transport imply, so an
+      ordinary workflow never needs this. SMTP: 465 implicit TLS, 587
+      STARTTLS, 25 plaintext. NNTP: 563 implicit TLS (NNTPS), 119 for
+      STARTTLS and plaintext.
     required: false
-    default: '465'
+    default: ''
+  protocol:
+    description: >-
+      "smtp" (default) sends mail; "nntp" posts one article to the newsgroups
+      named by `newsgroups`. Chosen explicitly and never inferred from which
+      other inputs are set, so a workflow that mixes the two is told which
+      mistake it made. NNTP always authenticates (AUTHINFO USER/PASS, the
+      `username`/`password` inputs) and always posts exactly one article.
+    required: false
+    default: 'smtp'
   secure:
     description: >-
-      Transport selection, fail-closed. "true" (default) or "implicit" =
-      implicit TLS from the first byte (SMTPS, normally port 465). "false" or
-      "starttls" = start in the clear and upgrade with STARTTLS (RFC 3207,
-      normally port 587); the upgrade is MANDATORY, so a server that does not
-      advertise STARTTLS fails the step rather than being talked to in the
-      clear. "plaintext" = no TLS at all, which sends the password
+      Transport selection, fail-closed, for both protocols. "true" (default)
+      or "implicit" = implicit TLS from the first byte: SMTPS (normally port
+      465), or NNTPS (normally port 563) with protocol: nntp. "false" or
+      "starttls" = start in the clear and upgrade with STARTTLS — RFC 3207 on
+      the submission port (normally 587), RFC 4642 on the news port (normally
+      119); the upgrade is MANDATORY, so a server that does not advertise
+      STARTTLS fails the step rather than being talked to in the clear. "plaintext" = no TLS at all, which sends the password
       base64-encoded in the clear; use it only against a containerized test
       sink. Any other value is rejected outright. Note the difference from
       dawidd6/action-send-mail, where "false" means "STARTTLS when the server
@@ -36,12 +52,14 @@ inputs:
     required: false
     default: 'true'
   username:
-    description: 'SMTP username (AUTH PLAIN or AUTH LOGIN, chosen from what the server offers)'
+    description: >-
+      Username (SMTP: AUTH PLAIN or AUTH LOGIN, chosen from what the server
+      offers. NNTP: AUTHINFO USER, always used).
     required: false
     default: ''
   password:
     description: >-
-      SMTP password. Reaches the binary via the environment, never argv,
+      Password. Reaches the binary via the environment, never argv,
       so it cannot leak into process listings.
     required: false
     default: ''
@@ -50,7 +68,18 @@ inputs:
     required: false
     default: ''
   to:
-    description: 'Recipients, separated by commas and/or whitespace'
+    description: >-
+      Recipients, separated by commas and/or whitespace. SMTP only: a news
+      article has no envelope, it is addressed by its Newsgroups header.
+    required: false
+    default: ''
+  newsgroups:
+    description: >-
+      One or more newsgroup names, comma-separated (e.g. "comp.lang.idris" or
+      "alt.test, uk.rec.cycling"), for protocol: nntp. RFC 5536 §3.1.4
+      well-formedness is enforced: the names must exist on the server, `*` and
+      `control`/`control.*` are refused, and anything malformed fails the step
+      rather than being repaired.
     required: false
     default: ''
   subject:
@@ -68,22 +97,23 @@ inputs:
     required: false
     default: ''
   body:
-    description: 'Plain-text body only (no HTML, images, or tracking content; dot-stuffed on the wire per RFC 5321)'
+    description: 'Plain-text body (no HTML, images, or tracking content; dot-stuffed on the wire: RFC 5321 for SMTP, RFC 3977 for NNTP)'
     required: false
     default: ''
   diagnose:
     description: >-
-      "true" = non-delivery probe. Reports DNS, TCP, TLS, EHLO and AUTH as
-      separate stages, one line each, then MSG (whether the message inputs
-      would pass local checks), and names the stage that failed. AUTH reports
+      "true" = non-delivery probe. SMTP only: Reports DNS, TCP, TLS, EHLO and
+      AUTH as separate stages, one line each, then MSG (whether the message
+      inputs would pass local checks), and names the stage that failed. AUTH reports
       which mechanism this client would use; no credential is sent, so a wrong
       password is NOT detected. Nothing is delivered.
     required: false
     default: 'false'
   handshake_only:
     description: >-
-      "true" = connect, TLS handshake, EHLO, QUIT. No auth, nothing sent.
-      For canary/CI verification against a real server without delivering mail.
+      "true" = connect, TLS handshake, EHLO/CAPABILITIES, QUIT. No auth,
+      nothing sent or posted. For canary/CI verification against a real server
+      without delivering mail; the news equivalent of the probe.
     required: false
     default: 'false'
   timeout_seconds:
@@ -125,18 +155,18 @@ runs:
         case "$(uname -m)" in
           x86_64)
             asset="smtp-notify-x86_64-linux-musl"
-            sha256="d4cee25312c49a2b6f83fa6320e238d3823ccbe371055701e49ff59339096165"
+            sha256="2683da8f619dd5f310c9f6884da39e825c807c2c86a6319c19aba39b27f9c5c9"
             ;;
           aarch64)
             asset="smtp-notify-aarch64-linux-musl"
-            sha256="99677930e4fc22e0b4821218d3bb1ad9f36f7839854418d6222405c3fd246018"
+            sha256="a58138308fb9832e1ceb551a12f1b04e591dc38ba5fd336c9acfb3f263161f29"
             ;;
           *)
             echo "smtp-notify: unsupported runner architecture: $(uname -m)" >&2
             exit 1
             ;;
         esac
-        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.4.0/${asset}"
+        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.5.0/${asset}"
         curl -fsSL --retry 3 --retry-delay 2 -o "${RUNNER_TEMP}/smtp-notify" "$url"
         echo "${sha256}  ${RUNNER_TEMP}/smtp-notify" | sha256sum -c -
         chmod +x "${RUNNER_TEMP}/smtp-notify"
@@ -146,6 +176,7 @@ runs:
       env:
         SMTP_ADDR: ${{ inputs.server_address }}
         SMTP_PORT: ${{ inputs.server_port }}
+        SMTP_PROTOCOL: ${{ inputs.protocol }}
         SMTP_SECURE: ${{ inputs.secure }}
         SMTP_HANDSHAKE_ONLY: ${{ inputs.handshake_only }}
         SMTP_DIAGNOSE: ${{ inputs.diagnose }}
@@ -154,6 +185,7 @@ runs:
         SMTP_PASS: ${{ inputs.password }}
         MAIL_FROM: ${{ inputs.from }}
         MAIL_TO: ${{ inputs.to }}
+        MAIL_NEWSGROUPS: ${{ inputs.newsgroups }}
         MAIL_SUBJECT: ${{ inputs.subject }}
         MAIL_CONTENT_LANGUAGE: ${{ inputs.content_language }}
         MAIL_BODY: ${{ inputs.body }}

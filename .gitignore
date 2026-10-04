@@ -1,3 +1,7 @@
 .zig-cache/
 zig-out/
 spec/build/
+# Artifacts of the NNTP sink fixture (scripts/nntp-sink.py), not sources.
+*.transcript
+sink.log
+sink.*.log

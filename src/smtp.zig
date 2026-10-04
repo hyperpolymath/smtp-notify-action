@@ -241,40 +241,11 @@ pub const Diagnostic = struct {
     }
 };
 
-/// The byte streams a session rides on.
-pub const Wire = struct {
-    r: *std.Io.Reader,
-    w: *std.Io.Writer,
-    /// For layered transports (TLS over TCP): flushing `w` only encrypts
-    /// buffered plaintext into the transport writer below — that writer must
-    /// then be flushed itself for the records to reach the socket.
-    below: ?*std.Io.Writer = null,
-
-    /// Flush this layer and, for TLS, the transport writer beneath it.
-    pub fn flush(wire: Wire) std.Io.Writer.Error!void {
-        try wire.w.flush();
-        if (wire.below) |b| try b.flush();
-    }
-};
-
-/// Turns the current stream into an encrypted one, in place, after the server
-/// has accepted STARTTLS.
-///
-/// The session driver deliberately knows nothing about TLS — it talks to
-/// generic readers and writers so the tests below can drive whole sessions
-/// against in-memory scripts. The upgrade is therefore a callback the caller
-/// supplies: main.zig hands over one backed by `src/tls/Client.zig`, and a
-/// test hands over one that simply swaps in a different in-memory stream,
-/// which is enough to prove the driver really does switch streams.
-pub const Upgrader = struct {
-    ctx: *anyopaque,
-    upgradeFn: *const fn (ctx: *anyopaque) anyerror!Wire,
-
-    /// Run the caller's handshake and return the encrypted stream.
-    pub fn upgrade(u: Upgrader) anyerror!Wire {
-        return u.upgradeFn(u.ctx);
-    }
-};
+/// The byte streams a session rides on, and the STARTTLS upgrade callback.
+/// Both are defined in `wire.zig` now that the NNTP driver rides the same
+/// ones; re-exported under the names this module's callers already use.
+pub const Wire = @import("wire.zig").Wire;
+pub const Upgrader = @import("wire.zig").Upgrader;
 
 /// Every check on the message inputs that can be made without a server:
 /// header injection, subject encodability, the Content-Language grammar.

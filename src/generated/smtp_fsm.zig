@@ -2,6 +2,11 @@
 // DO NOT EDIT — run scripts/gen-fsm.sh; CI diffs this file against a
 // fresh generation and fails on drift.
 // SPDX-License-Identifier: MPL-2.0
+//
+// Carries both proven session contracts — SMTP (RFC 5321, RFC 3207) and
+// NNTP (RFC 3977, RFC 4642) — plus the message-grammar golden vectors
+// each one is checked against. The SMTP tables are unchanged from
+// v0.4.0; the `nntp_*` section is additive.
 
 pub const Phase = enum(u8) { connect, ehlo, starttls, ehlo_tls, auth, mail_from, rcpt_to, data, payload, quit, done };
 
@@ -105,4 +110,92 @@ pub const lang_vectors = [_]HeaderVector{
     .{ .input = "en\r\nBcc: victim@example.org", .ok = false },
     .{ .input = "en\nX-Injected: 1", .ok = false },
     .{ .input = "café", .ok = false },
+};
+
+// ---------------------------------------------------------------------------
+// NNTP (RFC 3977): posting one article. Separate enums rather than shared
+// ones, because the reply that matters most is the greeting: 201 is a
+// SUCCESSFUL greeting that forbids exactly what this client came to do,
+// and 101, 340 and 382 are intermediate replies that are not one class.
+// An SMTP-shaped enum would be a lie in the type.
+
+pub const NPhase = enum(u8) { connect, capabilities, starttls, caps_tls, auth, post, payload, quit, done };
+
+pub const NAction = enum(u8) { none, capabilities, starttls, authinfo, post, payload, quit };
+
+pub const NStep = struct {
+    nphase: NPhase,
+    nsend: NAction,
+    /// Reply codes accepted as success. 4xx = transient failure,
+    /// 5xx = permanent failure, anything else = protocol error.
+    nexpect: []const u16,
+    nnext: NPhase,
+    /// Always false: one article per session. A field rather than an
+    /// omission, so a repeating row would fail the spec's nNoRepeats
+    /// instead of silently disagreeing with the driver.
+    nrepeats: bool,
+};
+
+/// Session over an already-encrypted (NNTPS, port 563) or deliberately
+/// plain stream. One article per session.
+pub const nntp_script_implicit = [_]NStep{
+    .{ .nphase = .connect, .nsend = .none, .nexpect = &.{ 200 }, .nnext = .capabilities, .nrepeats = false },
+    .{ .nphase = .capabilities, .nsend = .capabilities, .nexpect = &.{ 101 }, .nnext = .auth, .nrepeats = false },
+    .{ .nphase = .auth, .nsend = .authinfo, .nexpect = &.{ 281 }, .nnext = .post, .nrepeats = false },
+    .{ .nphase = .post, .nsend = .post, .nexpect = &.{ 340 }, .nnext = .payload, .nrepeats = false },
+    .{ .nphase = .payload, .nsend = .payload, .nexpect = &.{ 240 }, .nnext = .quit, .nrepeats = false },
+    .{ .nphase = .quit, .nsend = .quit, .nexpect = &.{ 205 }, .nnext = .done, .nrepeats = false },
+};
+
+/// Session that begins in cleartext on the news port and upgrades in
+/// place (RFC 4642). The second CAPABILITIES is mandatory: the server
+/// may advertise differently once the session is encrypted.
+pub const nntp_script_starttls = [_]NStep{
+    .{ .nphase = .connect, .nsend = .none, .nexpect = &.{ 200 }, .nnext = .capabilities, .nrepeats = false },
+    .{ .nphase = .capabilities, .nsend = .capabilities, .nexpect = &.{ 101 }, .nnext = .starttls, .nrepeats = false },
+    .{ .nphase = .starttls, .nsend = .starttls, .nexpect = &.{ 382 }, .nnext = .caps_tls, .nrepeats = false },
+    .{ .nphase = .caps_tls, .nsend = .capabilities, .nexpect = &.{ 101 }, .nnext = .auth, .nrepeats = false },
+    .{ .nphase = .auth, .nsend = .authinfo, .nexpect = &.{ 281 }, .nnext = .post, .nrepeats = false },
+    .{ .nphase = .post, .nsend = .post, .nexpect = &.{ 340 }, .nnext = .payload, .nrepeats = false },
+    .{ .nphase = .payload, .nsend = .payload, .nexpect = &.{ 240 }, .nnext = .quit, .nrepeats = false },
+    .{ .nphase = .quit, .nsend = .quit, .nexpect = &.{ 205 }, .nnext = .done, .nrepeats = false },
+};
+
+/// The table for a transport. Selecting by value rather than exporting
+/// one `script` keeps the caller from silently walking the wrong shape.
+pub fn nntpScriptFor(starttls: bool) []const NStep {
+    return if (starttls) &nntp_script_starttls else &nntp_script_implicit;
+}
+
+pub const NewsgroupVector = struct { input: []const u8, ok: bool };
+
+/// Newsgroups verdicts computed by Nntp.Serialize.newsgroupsOk
+/// (RFC 5536 name list, well-formedness only; `control` refused).
+pub const newsgroup_vectors = [_]NewsgroupVector{
+    .{ .input = "comp.infosystems.www.authoring.html", .ok = true },
+    .{ .input = "git.annex", .ok = true },
+    .{ .input = "comp.lang.c++", .ok = true },
+    .{ .input = "comp.lang.idris", .ok = true },
+    .{ .input = "alt.test", .ok = true },
+    .{ .input = "uk.rec.cycling", .ok = true },
+    .{ .input = "gmane.comp.version-control.git", .ok = true },
+    .{ .input = "comp.infosystems.www.authoring.html, alt.test", .ok = true },
+    .{ .input = "comp.lang.idris , alt.test", .ok = true },
+    .{ .input = "comp.lang.idris,alt.test", .ok = true },
+    .{ .input = "control", .ok = false },
+    .{ .input = "control.cancel", .ok = false },
+    .{ .input = "comp..lang", .ok = false },
+    .{ .input = ".comp", .ok = false },
+    .{ .input = "comp.", .ok = false },
+    .{ .input = "comp lang", .ok = false },
+    .{ .input = "comp/lang", .ok = false },
+    .{ .input = "comp.lang.c#", .ok = false },
+    .{ .input = "*", .ok = false },
+    .{ .input = "*.*", .ok = false },
+    .{ .input = "", .ok = false },
+    .{ .input = "comp.lang.idris\r\nX-Injected: 1", .ok = false },
+    .{ .input = "comp.lang.idris\nInjected: 1", .ok = false },
+    .{ .input = "café", .ok = false },
+    .{ .input = "comp.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .ok = false },
+    .{ .input = "a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a", .ok = false },
 };
