@@ -34,7 +34,7 @@ toc::[]
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.1
   with:
     server_address: ${{ secrets.SMTP_HOST }}
     server_port: 465
@@ -52,7 +52,7 @@ On the submission port, set `secure` to `starttls` and the port to 587:
 [source,yaml]
 ----
 - name: Notify by mail
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.1
   with:
     server_address: smtp.office365.com   # or smtp.gmail.com
     server_port: 587
@@ -77,7 +77,7 @@ To post to a newsgroup instead, set `protocol: nntp` and name the groups with
 [source,yaml]
 ----
 - name: Post to a newsgroup
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.0
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.1
   with:
     protocol: nntp
     server_address: news.example.org

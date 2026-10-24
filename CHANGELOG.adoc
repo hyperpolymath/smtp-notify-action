@@ -12,6 +12,39 @@ The unit of release is the *action ref*: the tag or commit you pin determines bo
 
 toc::[]
 
+== v0.5.1 — 2026-10-24
+
+A metadata correction, and the release to publish the Marketplace listing from.
+The binary is *byte-identical* to v0.5.0's — the two SHA-256 pins are unchanged
+and re-verified by the release workflow — so v0.5.0 remains supported and
+correct for anyone already pinned to it. A new tag rather than an edit of the
+existing one because a tag is immutable here: consumers pin SHAs, and GitHub
+reads `action.yml` *from the tag*, which is the same property that made v0.5.0
+necessary in the first place.
+
+NOTE: The v0.5.0 heading below carries a note that the tag had to be pushed
+immediately after its merge. That was done, and the release published the same
+day; the note is left in place because it describes a property of the release
+process, not a pending task.
+
+=== Fixed
+
+* *`server_address` is no longer described as SMTP-only.* The field is the host
+  for both protocols, and the description said `'SMTP server host name'` — the
+  last input description that still read as if the news transport did not
+  exist. It now reads `'Server host name (SMTP or NNTP, per protocol:
+  `protocol`)'`. Cosmetic, but workflow editors and consumers read `action.yml`
+  from the release ref, which is why it ships as a new tag rather than a
+  `main`-only edit.
+
+=== Changed
+
+* The asset URL names `v0.5.1`. The pins do not move: the binary did not change.
+* The `secure` and `diagnose` input descriptions were rewrapped to the file's
+  line width (and `Reports` lowercased after the colon in `diagnose`).
+* `README.adoc`'s three pinned examples and `.github/SECURITY.md`'s
+  supported-versions table follow the current release.
+
 == v0.5.0 — 2026-10-04
 
 Newsgroup posting, and the release that can finally be listed on the GitHub

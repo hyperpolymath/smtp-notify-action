@@ -16,7 +16,7 @@ branding:
 
 inputs:
   server_address:
-    description: 'SMTP server host name'
+    description: 'Server host name (SMTP or NNTP, per protocol: `protocol`)'
     required: true
   server_port:
     description: >-
@@ -43,9 +43,10 @@ inputs:
       "starttls" = start in the clear and upgrade with STARTTLS — RFC 3207 on
       the submission port (normally 587), RFC 4642 on the news port (normally
       119); the upgrade is MANDATORY, so a server that does not advertise
-      STARTTLS fails the step rather than being talked to in the clear. "plaintext" = no TLS at all, which sends the password
-      base64-encoded in the clear; use it only against a containerized test
-      sink. Any other value is rejected outright. Note the difference from
+      STARTTLS fails the step rather than being talked to in the clear.
+      "plaintext" = no TLS at all, which sends the password base64-encoded in
+      the clear; use it only against a containerized test sink. Any other
+      value is rejected outright. Note the difference from
       dawidd6/action-send-mail, where "false" means "STARTTLS when the server
       offers it": here a server that does not offer it is an error, not a
       downgrade.
@@ -102,11 +103,11 @@ inputs:
     default: ''
   diagnose:
     description: >-
-      "true" = non-delivery probe. SMTP only: Reports DNS, TCP, TLS, EHLO and
-      AUTH as separate stages, one line each, then MSG (whether the message
-      inputs would pass local checks), and names the stage that failed. AUTH reports
-      which mechanism this client would use; no credential is sent, so a wrong
-      password is NOT detected. Nothing is delivered.
+      "true" = non-delivery probe. SMTP only: reports DNS, TCP, TLS, EHLO
+      and AUTH as separate stages, one line each, then MSG (whether the
+      message inputs would pass local checks), and names the stage that failed.
+      AUTH reports which mechanism this client would use; no credential is
+      sent, so a wrong password is NOT detected. Nothing is delivered.
     required: false
     default: 'false'
   handshake_only:
@@ -166,7 +167,7 @@ runs:
             exit 1
             ;;
         esac
-        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.5.0/${asset}"
+        url="https://github.com/hyperpolymath/smtp-notify-action/releases/download/v0.5.1/${asset}"
         curl -fsSL --retry 3 --retry-delay 2 -o "${RUNNER_TEMP}/smtp-notify" "$url"
         echo "${sha256}  ${RUNNER_TEMP}/smtp-notify" | sha256sum -c -
         chmod +x "${RUNNER_TEMP}/smtp-notify"

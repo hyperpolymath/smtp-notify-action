@@ -24,7 +24,8 @@ defects instead of waiting to be asked about them.
 
 | Version | Supported |
 |---|---|
-| `v0.5.0` | Yes — current release |
+| `v0.5.1` | Yes — current release |
+| `v0.5.0` | Yes — same binary and inputs as v0.5.1; only the `server_address` description differs |
 | `v0.4.0` | No — superseded; SMTP only, and its `action.yml` declares no `protocol` input |
 | `v0.3.0` | No — superseded; `action.yml` of commits after it and before v0.4.0 offers inputs its binary ignores (D-011) |
 | `v0.2.0` | No — superseded; implicit TLS only, no STARTTLS |
