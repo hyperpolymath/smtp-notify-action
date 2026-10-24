@@ -35,7 +35,13 @@ expect "SMTP_PROTOCOL is nntp but MAIL_NEWSGROUPS is empty" \
 expect "MAIL_NEWSGROUPS is set but SMTP_PROTOCOL is smtp" \
   SMTP_ADDR=127.0.0.1 SMTP_PORT=1180 SMTP_SECURE=plaintext MAIL_NEWSGROUPS=alt.test \
   MAIL_TO=x@example.test MAIL_FROM=ci@example.test MAIL_SUBJECT=s MAIL_BODY=b
-expect 'SMTP_PROTOCOL is "nntps", which is neither' "${news[@]}" SMTP_PROTOCOL=nntps
+expect 'SMTP_PROTOCOL is "pop3", which is not one of: smtp, nntp, nntps' "${news[@]}" SMTP_PROTOCOL=pop3
+expect "SMTP_PROTOCOL is nntps (implicit TLS, port 563), which contradicts SMTP_SECURE" "${news[@]}" SMTP_PROTOCOL=nntps
+expect "SMTP_PROTOCOL is nntps (implicit TLS, port 563), which contradicts SMTP_SECURE" "${news[@]}" SMTP_PROTOCOL=nntps SMTP_SECURE=starttls
+expect "SMTP_PROTOCOL is nntps but MAIL_NEWSGROUPS is empty" \
+  SMTP_ADDR=127.0.0.1 SMTP_PORT=1180 SMTP_SECURE=true SMTP_PROTOCOL=nntps
+expect "not a comma-separated list of well-formed newsgroup names" \
+  "${news[@]}" SMTP_PROTOCOL=nntps SMTP_SECURE=true MAIL_NEWSGROUPS=control
 expect "SMTP_DIAGNOSE is an SMTP probe and is not implemented for NNTP" "${news[@]}" SMTP_DIAGNOSE=true
 expect "posting to a newsgroup authenticates (AUTHINFO USER/PASS)" \
   "${news[@]}" SMTP_USER= SMTP_PASS=

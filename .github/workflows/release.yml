@@ -88,7 +88,17 @@ jobs:
           set -euo pipefail
           (cd dist && sha256sum smtp-notify-*-linux-musl > SHA256SUMS)
           tag="${GITHUB_REF_NAME}"
+          prerelease_args=()
+          case "$tag" in
+            *-*)
+              # SemVer pre-release tag (e.g. v0.6.0-rc.1): publish as a GitHub
+              # pre-release so the current stable tag stays Latest (and remains
+              # the Marketplace-eligible release).
+              prerelease_args=(--prerelease)
+              ;;
+          esac
           gh release create "$tag" \
+            "${prerelease_args[@]}" \
             --title "$tag" \
             --notes "Static, byte-reproducible smtp-notify binaries. CI rebuilt them from this tag and verified they hash to exactly the SHA-256 pins inside this tag's action.yml before publishing." \
             dist/smtp-notify-x86_64-linux-musl \

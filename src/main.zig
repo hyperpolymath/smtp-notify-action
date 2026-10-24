@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: MPL-2.0
-//! smtp-notify — send one plain-text notification mail over implicit TLS
-//! (SMTPS, typically port 465), or plaintext for containerized test sinks.
+//! smtp-notify — send one plain-text notification mail over SMTPS / STARTTLS,
+//! or post one newsgroup article over NNTPS / NNTP+STARTTLS (or plaintext for
+//! containerized test sinks).
 //!
 //! ALL configuration comes from environment variables, never argv, so the
 //! credential cannot leak into process listings:
 //!
 //!   SMTP_ADDR            server host name (required)
-//!   SMTP_PORT            server port (required)
+//!   SMTP_PORT            server port (empty = protocol/transport default)
+//!   SMTP_PROTOCOL        "smtp" (default), "nntp", or "nntps" (implicit TLS, 563)
 //!   SMTP_SECURE          transport: "true"/"implicit" (default) = TLS from the
 //!                        first byte; "false"/"starttls" = STARTTLS, mandatory;
 //!                        "plaintext" = no TLS. Anything else is fatal.
 //!   SMTP_TIMEOUT_SECONDS whole-run deadline, default 60
-//!   SMTP_USER            AUTH PLAIN username
-//!   SMTP_PASS            AUTH PLAIN password
+//!   SMTP_USER            SMTP AUTH (PLAIN/LOGIN) or NNTP AUTHINFO username
+//!   SMTP_PASS            SMTP AUTH (PLAIN/LOGIN) or NNTP AUTHINFO password
 //!   MAIL_FROM            From: value, e.g. "GitHub Push <bot@example.org>"
-//!   MAIL_TO              recipients, separated by commas and/or whitespace
+//!   MAIL_TO              recipients, separated by commas and/or whitespace (SMTP)
+//!   MAIL_NEWSGROUPS      comma-separated RFC 5536 newsgroup names (NNTP/NNTPS)
 //!   MAIL_SUBJECT         Subject: value (non-ASCII sent as RFC 2047 UTF-8
 //!                        encoded-words; CR/LF and invalid UTF-8 rejected)
 //!   MAIL_CONTENT_LANGUAGE optional RFC 3282 list of RFC 5646 tags ("en-GB",
@@ -112,8 +115,10 @@ fn parseTransport(map: *const Env) Transport {
 /// Chosen by name, never inferred from which inputs happen to be set. A
 /// workflow that sets `newsgroups` by mistake while meaning to send mail
 /// should be told so, not quietly switched onto a different wire protocol —
-/// and vice versa.
-pub const Protocol = enum { smtp, nntp };
+/// and vice versa. `nntps` names both the news protocol and implicit TLS
+/// (RFC 4642, port 563), so pairing it with `starttls` or `plaintext` is a
+/// contradiction and is refused rather than downgraded or ignored.
+pub const Protocol = enum { smtp, nntp, nntps };
 
 /// Parse `SMTP_PROTOCOL`, fail-closed. Unset or empty means SMTP, which is
 /// what every existing workflow means.
@@ -122,14 +127,28 @@ fn parseProtocol(map: *const Env) Protocol {
     if (v.len == 0) return .smtp;
     if (std.ascii.eqlIgnoreCase(v, "smtp")) return .smtp;
     if (std.ascii.eqlIgnoreCase(v, "nntp")) return .nntp;
-    fatal("SMTP_PROTOCOL is \"{s}\", which is neither \"smtp\" nor \"nntp\"", .{v});
+    if (std.ascii.eqlIgnoreCase(v, "nntps")) return .nntps;
+    fatal("SMTP_PROTOCOL is \"{s}\", which is not one of: smtp, nntp, nntps", .{v});
+}
+
+/// Whether `protocol` and `transport` agree.
+///
+/// `smtp` and `nntp` leave transport selection to `SMTP_SECURE`. `nntps`
+/// already promises implicit TLS in its own name, so any other transport
+/// would either silently downgrade encryption or silently ignore `SMTP_SECURE`
+/// (D-011); neither is acceptable.
+fn protocolAllowsTransport(protocol: Protocol, transport: Transport) bool {
+    return switch (protocol) {
+        .smtp, .nntp => true,
+        .nntps => transport == .implicit_tls,
+    };
 }
 
 /// The port a transport implies when the workflow did not name one.
 ///
 /// These are the registered defaults, not guesses: 465/587/25 for SMTP
-/// (RFC 8314 §3.3 and the submission port) and 563/119 for NNTP
-/// (RFC 3977 §4, RFC 4642 §3). Naming one explicitly always wins.
+/// (RFC 8314 §3.3 and the submission port) and 563/119 for NNTP/NNTPS
+/// (RFC 3977 §4, RFC 4642 §2.1 & §3). Naming one explicitly always wins.
 fn defaultPort(protocol: Protocol, transport: Transport) u16 {
     return switch (protocol) {
         .smtp => switch (transport) {
@@ -141,6 +160,7 @@ fn defaultPort(protocol: Protocol, transport: Transport) u16 {
             .implicit_tls => 563,
             .starttls, .plaintext => 119,
         },
+        .nntps => 563,
     };
 }
 
@@ -265,6 +285,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const addr = envRequired(envs, "SMTP_ADDR");
     const transport = parseTransport(envs);
     const protocol = parseProtocol(envs);
+    if (!protocolAllowsTransport(protocol, transport)) fatal(
+        "SMTP_PROTOCOL is nntps (implicit TLS, port 563), which contradicts SMTP_SECURE ({s}). " ++
+            "Refusing to downgrade or ignore either input; set SMTP_PROTOCOL: nntp for STARTTLS/plaintext, " ++
+            "or leave SMTP_SECURE at true/implicit.",
+        .{env(envs, "SMTP_SECURE") orelse ""},
+    );
     const port = resolvePort(envs, protocol, transport);
     const diagnose = envFlag(envs, "SMTP_DIAGNOSE", false);
     // Both flags are parsed before either is used, so a malformed value is
@@ -283,15 +309,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     switch (protocol) {
         .smtp => if (newsgroups != null and newsgroups.?.len != 0) fatal(
             "MAIL_NEWSGROUPS is set but SMTP_PROTOCOL is smtp (the default). " ++
-                "Refusing to guess whether you meant mail or news; set SMTP_PROTOCOL: nntp, " ++
+                "Refusing to guess whether you meant mail or news; set SMTP_PROTOCOL: nntps (or nntp), " ++
                 "or use MAIL_TO for mail.",
             .{},
         ),
-        .nntp => {
+        .nntp, .nntps => {
             if (newsgroups == null or newsgroups.?.len == 0) fatal(
-                "SMTP_PROTOCOL is nntp but MAIL_NEWSGROUPS is empty. " ++
+                "SMTP_PROTOCOL is {s} but MAIL_NEWSGROUPS is empty. " ++
                     "One or more newsgroup names are required, e.g. \"alt.test\".",
-                .{},
+                .{@tagName(protocol)},
             );
             if (diagnose) fatal(
                 "SMTP_DIAGNOSE is an SMTP probe and is not implemented for NNTP. " ++
@@ -312,7 +338,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const now: std.Io.Timestamp = .now(io, .real);
 
-    if (protocol == .nntp) {
+    if (protocol == .nntp or protocol == .nntps) {
         return runNews(gpa, io, envs, addr, port, transport, handshake_only, now);
     }
 
@@ -1278,7 +1304,7 @@ test "SMTP_SECURE: the fail-closed spellings, and nothing else" {
     }
 }
 
-test "SMTP_PROTOCOL: unset or empty means SMTP; the two names are recognised" {
+test "SMTP_PROTOCOL: unset or empty means SMTP; the three names are recognised" {
     {
         var e = testEnv(&.{});
         defer e.deinit();
@@ -1299,6 +1325,26 @@ test "SMTP_PROTOCOL: unset or empty means SMTP; the two names are recognised" {
         defer e.deinit();
         try testing.expectEqual(Protocol.nntp, parseProtocol(&e));
     }
+    {
+        var e = testEnv(&.{.{ "SMTP_PROTOCOL", "nntps" }});
+        defer e.deinit();
+        try testing.expectEqual(Protocol.nntps, parseProtocol(&e));
+    }
+    {
+        var e = testEnv(&.{.{ "SMTP_PROTOCOL", "NNTPS" }});
+        defer e.deinit();
+        try testing.expectEqual(Protocol.nntps, parseProtocol(&e));
+    }
+}
+
+test "nntps accepts only implicit TLS; smtp and nntp defer to SMTP_SECURE" {
+    try testing.expect(protocolAllowsTransport(.nntps, .implicit_tls));
+    try testing.expect(!protocolAllowsTransport(.nntps, .starttls));
+    try testing.expect(!protocolAllowsTransport(.nntps, .plaintext));
+    for ([_]Transport{ .implicit_tls, .starttls, .plaintext }) |t| {
+        try testing.expect(protocolAllowsTransport(.smtp, t));
+        try testing.expect(protocolAllowsTransport(.nntp, t));
+    }
 }
 
 test "default ports: what each protocol and transport means when none is named" {
@@ -1310,6 +1356,7 @@ test "default ports: what each protocol and transport means when none is named" 
     try testing.expectEqual(@as(u16, 563), defaultPort(.nntp, .implicit_tls));
     try testing.expectEqual(@as(u16, 119), defaultPort(.nntp, .starttls));
     try testing.expectEqual(@as(u16, 119), defaultPort(.nntp, .plaintext));
+    try testing.expectEqual(@as(u16, 563), defaultPort(.nntps, .implicit_tls));
 }
 
 test "SMTP_PORT: an explicit port always wins, empty and unset fall through" {
@@ -1327,6 +1374,11 @@ test "SMTP_PORT: an explicit port always wins, empty and unset fall through" {
         var e = testEnv(&.{.{ "SMTP_PORT", "" }});
         defer e.deinit();
         try testing.expectEqual(@as(u16, 119), resolvePort(&e, .nntp, .starttls));
+    }
+    {
+        var e = testEnv(&.{});
+        defer e.deinit();
+        try testing.expectEqual(@as(u16, 563), resolvePort(&e, .nntps, .implicit_tls));
     }
     {
         var e = testEnv(&.{});

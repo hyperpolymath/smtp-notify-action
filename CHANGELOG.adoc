@@ -12,6 +12,33 @@ The unit of release is the *action ref*: the tag or commit you pin determines bo
 
 toc::[]
 
+== v0.6.0-rc.1 — 2026-10-24 (pre-release)
+
+Pre-release adding `protocol: nntps` as a direct, fail-closed spelling for NNTP
+over implicit TLS (port 563), alongside SemVer pre-release support in
+`release.yml`. Published as a GitHub pre-release so `v0.5.1` remains `Latest`
+(and the Marketplace-eligible stable release) while `protocol: nntps` and D-015
+(live news-server verification) are exercised.
+
+=== Added
+
+* *`protocol: nntps` (`SMTP_PROTOCOL=nntps`).* Selects NNTP over implicit TLS
+  (RFC 4642 §2.1, default port 563) directly without needing a separate
+  `secure:` line. Fail-closed against conflicting transport inputs: pairing
+  `protocol: nntps` with `secure: false`/`starttls` or `secure: plaintext`
+  refuses the run before opening a socket rather than silently downgrading TLS
+  or silently ignoring `secure` (D-011).
+* *Pre-release tag handling in `.github/workflows/release.yml`.* Tags carrying a
+  SemVer pre-release suffix (`*-*`, such as `v0.6.0-rc.1`) now pass
+  `--prerelease` to `gh release create`, keeping the latest stable tag as
+  `Latest`.
+
+=== Changed
+
+* `action.yml` asset URL names `v0.6.0-rc.1` and pins the rebuilt static musl
+  binaries (`adc643aa…` for `x86_64-linux-musl`, `16206d7d…` for
+  `aarch64-linux-musl`).
+
 == v0.5.1 — 2026-10-24
 
 A metadata correction, and the release to publish the Marketplace listing from.

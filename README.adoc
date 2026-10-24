@@ -71,17 +71,18 @@ handshake and the mandatory second EHLO. Authentication on that route is covered
 by tests rather than by a live send; see
 link:KNOWN-DEFECTS.adoc[`KNOWN-DEFECTS.adoc`] D-005 to D-007.
 
-To post to a newsgroup instead, set `protocol: nntp` and name the groups with
-`newsgroups`. There is no `to`, because a news article has no envelope:
+To post to a newsgroup instead, set `protocol: nntp` (or `protocol: nntps` from
+`v0.6.0-rc.1`, which selects implicit TLS on port 563 directly) and name the
+groups with `newsgroups`. There is no `to`, because a news article has no
+envelope:
 
 [source,yaml]
 ----
 - name: Post to a newsgroup
-  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.5.1
+  uses: hyperpolymath/smtp-notify-action@<pinned-sha> # v0.6.0-rc.1 (pre-release)
   with:
-    protocol: nntp
+    protocol: nntps                   # implicit TLS (NNTPS), port 563
     server_address: news.example.org
-    secure: true                      # implicit TLS (NNTPS), port 563
     username: ${{ secrets.NNTP_USERNAME }}
     password: ${{ secrets.NNTP_PASSWORD }}
     from: 'GitHub Push <bot@example.org>'
@@ -90,12 +91,13 @@ To post to a newsgroup instead, set `protocol: nntp` and name the groups with
     body: '${{ github.actor }} pushed ${{ github.sha }}'
 ----
 
-`secure: starttls` on the news port (119) is the encrypted-upgrade route: the
-session starts cleartext, `STARTTLS` is issued only if the server advertised it
-in `CAPABILITIES`, and the capability list is re-read afterwards because a
-server may advertise differently once encrypted (RFC 4642 §2.2). A server that
-does not offer the upgrade fails the step rather than being posted to in the
-clear.
+(On stable `v0.5.1`, spell the implicit-TLS news route as `protocol: nntp` with
+`secure: true`.) `secure: starttls` with `protocol: nntp` on the news port (119)
+is the encrypted-upgrade route: the session starts cleartext, `STARTTLS` is
+issued only if the server advertised it in `CAPABILITIES`, and the capability
+list is re-read afterwards because a server may advertise differently once
+encrypted (RFC 4642 §2.2). A server that does not offer the upgrade fails the
+step rather than being posted to in the clear.
 
 These nine input names match `dawidd6/action-send-mail` exactly:
 `server_address`, `server_port`, `secure`, `username`, `password`, `from`,
@@ -118,11 +120,13 @@ on and cannot be turned off by any input.
 |===
 |Input |Default |Meaning
 
-|`server_address` |_required_ |Server host name (SMTP or NNTP).
-|`protocol` |`smtp` |`smtp` sends mail; `nntp` posts one article to the
-newsgroups named by `newsgroups`. Explicit, never inferred from which other
-inputs are set: `newsgroups` with `protocol: smtp` fails the step telling you
-which mistake it is, rather than guessing. See <<news>>.
+|`server_address` |_required_ |Server host name (SMTP, NNTP, or NNTPS).
+|`protocol` |`smtp` |`smtp` sends mail; `nntp` and `nntps` post one article to
+the newsgroups named by `newsgroups`. `nntps` (from `v0.6.0-rc.1`) selects
+implicit TLS on port 563 directly and refuses `secure: starttls` or
+`plaintext`; `nntp` takes its transport from `secure`. Explicit, never inferred
+from which other inputs are set: `newsgroups` with `protocol: smtp` fails the
+step telling you which mistake it is, rather than guessing. See <<news>>.
 |`server_port` |_protocol default_ |Server port. Empty means the port the
 protocol and transport imply — SMTP: 465 implicit TLS, 587 STARTTLS, 25
 plaintext; NNTP: 563 implicit TLS, 119 STARTTLS and plaintext.
