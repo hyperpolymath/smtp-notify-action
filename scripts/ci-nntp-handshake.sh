@@ -8,8 +8,9 @@ cd "$(dirname "$0")/.."
 bin="${SMTP_NOTIFY_BIN:-./zig-out/bin/smtp-notify}"
 port=1181
 
+bash scripts/nntp-sink.sh build
 rm -f "$port.transcript" "sink.$port.log"
-python3 scripts/nntp-sink.py "$port" "200 sink ready" "240 ok" > "sink.$port.log" 2>&1 &
+bash scripts/nntp-sink.sh "$port" "200 sink ready" "240 ok" > "sink.$port.log" 2>&1 &
 sink=$!
 for _ in $(seq 1 50); do grep -q ready "sink.$port.log" 2>/dev/null && break; sleep 0.1; done
 

@@ -231,7 +231,7 @@ jobs:
           echo "$HOME/zig-toolchain" >> "$GITHUB_PATH"
       - name: Build
         run: zig build -Doptimize=ReleaseSafe
-      # scripts/nntp-sink.py is a test fixture: a one-shot NNTP server that
+      # scripts/nntp-sink.rs is a test fixture: a one-shot NNTP server that
       # answers the dialogue and records what the binary actually sent. It is
       # the news counterpart of the Mailpit container above, because no NNTP
       # server is available as a sha256-pinned container.

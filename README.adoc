@@ -232,14 +232,14 @@ the article — silently, while this step reports success.
 
 === Trying it without a news server
 
-`scripts/nntp-sink.py` is the fixture CI uses: a one-shot server that answers
+`scripts/nntp-sink.rs` (run through `scripts/nntp-sink.sh`, which compiles it with plain `rustc`) is the fixture CI uses: a one-shot server that answers
 the dialogue above and records what the binary actually sent. Against a local
 build:
 
 [source,bash]
 ----
 zig build
-python3 scripts/nntp-sink.py 1161 "200 sink ready" "240 Article received" &
+bash scripts/nntp-sink.sh 1161 "200 sink ready" "240 Article received" &
 SMTP_ADDR=127.0.0.1 SMTP_PORT=1161 SMTP_SECURE=plaintext SMTP_PROTOCOL=nntp \
 SMTP_USER=ci SMTP_PASS=ci MAIL_FROM='CI <ci@example.test>' \
 MAIL_SUBJECT='hello' MAIL_NEWSGROUPS='alt.test' MAIL_BODY=$'one\n.two' \

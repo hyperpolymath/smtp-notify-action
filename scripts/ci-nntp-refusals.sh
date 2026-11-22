@@ -13,9 +13,11 @@ bin="${SMTP_NOTIFY_BIN:-./zig-out/bin/smtp-notify}"
 user="SMTP_ADDR=127.0.0.1 SMTP_PROTOCOL=nntp SMTP_SECURE=plaintext SMTP_USER=ci SMTP_PASS=ci"
 msg="MAIL_FROM=ci@example.test MAIL_SUBJECT=s MAIL_NEWSGROUPS=alt.test MAIL_BODY=b"
 
+bash scripts/nntp-sink.sh build
+
 start_sink() { # $1 port, $2 greeting, $3 post-reply, $4 caps
   rm -f "$1.transcript"
-  python3 scripts/nntp-sink.py "$1" "$2" "$3" "$4" > "sink.$1.log" 2>&1 &
+  bash scripts/nntp-sink.sh "$1" "$2" "$3" "$4" > "sink.$1.log" 2>&1 &
   for _ in $(seq 1 50); do grep -q ready "sink.$1.log" 2>/dev/null && break; sleep 0.1; done
 }
 
