@@ -239,7 +239,9 @@ build:
 [source,bash]
 ----
 zig build
-bash scripts/nntp-sink.sh 1161 "200 sink ready" "240 Article received" &
+bash scripts/nntp-sink.sh build            # compile the fixture first
+bash scripts/nntp-sink.sh 1161 "200 sink ready" "240 Article received" > sink.log &
+until grep -q ready sink.log; do sleep 0.1; done   # wait for the ready marker
 SMTP_ADDR=127.0.0.1 SMTP_PORT=1161 SMTP_SECURE=plaintext SMTP_PROTOCOL=nntp \
 SMTP_USER=ci SMTP_PASS=ci MAIL_FROM='CI <ci@example.test>' \
 MAIL_SUBJECT='hello' MAIL_NEWSGROUPS='alt.test' MAIL_BODY=$'one\n.two' \

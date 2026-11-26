@@ -62,7 +62,7 @@ fn main() {
     let greeting = argv.get(2).map_or("200 sink ready", String::as_str);
     let post_reply = argv.get(3).map_or("240 Article received", String::as_str);
     let caps: Vec<&str> = match argv.get(4) {
-        Some(c) if !c.is_empty() => c.split(',').collect(),
+        Some(c) if !c.is_empty() && c != "--closes-after-post" => c.split(',').collect(),
         _ => vec!["VERSION 2", "READER", "POST", "AUTHINFO USER"],
     };
     let closes_after_post = argv.iter().any(|a| a == "--closes-after-post");
