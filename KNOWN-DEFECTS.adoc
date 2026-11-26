@@ -210,7 +210,7 @@ would have to be restated for a protocol whose capability exchange is
 |D-015
 |No NNTP session has ever been run against a real news server. The session
 dialogue, `NNTPS`, the `STARTTLS` upgrade and `AUTHINFO` are covered by
-scripted unit tests and by a local fixture sink (`scripts/nntp-sink.py`) in CI.
+scripted unit tests and by a local fixture sink (`scripts/nntp-sink.rs`) in CI.
 Unlike the SMTP path, there is no live canary: the `tls-handshake` job speaks
 SMTP to Gmail. The first live post should be treated as the experiment it is.
 |Medium

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MPL-2.0
 # CI: post one article through the built binary and assert what went on the
-# wire. Driven by the fixture in scripts/nntp-sink.py; keep the shell here
+# wire. Driven by the fixture in scripts/nntp-sink.rs; keep the shell here
 # rather than inline in the workflow so it can be run by hand against a local
 # build (`zig build && bash scripts/ci-nntp-post.sh`).
 set -euo pipefail
@@ -9,8 +9,9 @@ cd "$(dirname "$0")/.."
 bin="${SMTP_NOTIFY_BIN:-./zig-out/bin/smtp-notify}"
 port=1161
 
+bash scripts/nntp-sink.sh build
 rm -f "$port.transcript" sink.log
-python3 scripts/nntp-sink.py "$port" "200 sink ready" "240 Article received" > sink.log 2>&1 &
+bash scripts/nntp-sink.sh "$port" "200 sink ready" "240 Article received" > sink.log 2>&1 &
 sink=$!
 for _ in $(seq 1 50); do grep -q ready sink.log 2>/dev/null && break; sleep 0.1; done
 
